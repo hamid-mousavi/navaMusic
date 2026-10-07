@@ -3,6 +3,10 @@ import multer from 'multer';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
+import os from 'os';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import {
   S3Client,
   PutObjectCommand,
@@ -11,6 +15,8 @@ import {
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { createServer as createViteServer } from 'vite';
+
+const execFileAsync = promisify(execFile);
 
 dotenv.config();
 
@@ -452,8 +458,9 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// API: Process YouTube or Web URL
+// API: Process YouTube or Web URL (Extract audio, convert to MP3, upload to ArvanCloud S3)
 app.post('/api/extract-url', async (req, res) => {
+  let tempDir: string | null = null;
   try {
     const { url, title, reciterName, categoryId, bitrate } = req.body;
     if (!url || !String(url).trim()) {
@@ -468,14 +475,23 @@ app.post('/api/extract-url', async (req, res) => {
     const s3 = getS3Client();
     const bucketName = activeArvanConfig.bucketName;
 
-    // Check if it's a direct audio file URL (mp3, m4a, ogg, wav)
-    const isDirectAudio = cleanUrl.match(/\.(mp3|m4a|ogg|wav)($|\?)/i);
+    if (!s3 || !bucketName) {
+      return res.status(400).json({
+        error:
+          'اتصال به ابر آروان برقرار نیست. ابتدا کلیدهای استوریج ابر آروان را در بخش «تنظیمات ابر آروان» ذخیره کنید.',
+      });
+    }
 
-    if (isDirectAudio && s3) {
-      // Fetch audio from direct URL and stream to ArvanCloud S3
-      const audioResponse = await fetch(cleanUrl);
+    const isDirectAudio = cleanUrl.match(/\.(mp3|m4a|ogg|wav|aac|flac)($|\?)/i);
+
+    // Direct audio URL fast-path
+    if (isDirectAudio) {
+      console.log(`[Extract] Processing direct audio URL: ${cleanUrl}`);
+      const audioResponse = await fetch(cleanUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      });
       if (!audioResponse.ok) {
-        throw new Error(`دانلود از آدرس مبدا با خطا مواجه شد: ${audioResponse.statusText}`);
+        throw new Error(`دانلود فایل صوتی از مبدا با خطا مواجه شد (${audioResponse.status} ${audioResponse.statusText})`);
       }
       const arrayBuffer = await audioResponse.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
@@ -502,35 +518,167 @@ app.post('/api/extract-url', async (req, res) => {
         s3Key,
         fileSizeMb,
         title: title || 'قطعه صوتی استخراج شده از وب',
+        duration: 180,
+        coverUrl: '',
+        message: `فایل صوتی وب با موفقیت دانلود و در باکت «${bucketName}» ابر آروان ذخیره شد.`,
       });
     }
 
-    if (!s3) {
+    // Process YouTube or online video/audio page via yt-dlp
+    console.log(`[Extract] Starting yt-dlp media extraction for URL: ${cleanUrl}`);
+    const tempId = `${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    tempDir = path.join(os.tmpdir(), `ytdl_${tempId}`);
+    fs.mkdirSync(tempDir, { recursive: true });
+
+    const selectedQuality = bitrate === '320' ? '320k' : '128k';
+    const ytdlArgs = [
+      '-x',
+      '--audio-format',
+      'mp3',
+      '--audio-quality',
+      selectedQuality,
+      '-o',
+      `${tempDir}/audio.%(ext)s`,
+      '--write-thumbnail',
+      '-o',
+      `thumbnail:${tempDir}/thumb.%(ext)s`,
+      '--print-json',
+      '--no-playlist',
+      '--max-filesize',
+      '150M',
+      cleanUrl,
+    ];
+
+    let stdout = '';
+    let stderr = '';
+    try {
+      const execResult = await execFileAsync('yt-dlp', ytdlArgs, {
+        timeout: 120000, // 2 minutes max
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      stdout = execResult.stdout;
+      stderr = execResult.stderr;
+    } catch (execErr: any) {
+      console.error('[Extract] yt-dlp execution error:', execErr.message, execErr.stderr);
+      const errorMsg = String(execErr.stderr || execErr.message || '');
+      let friendlyMsg = 'خطا در دریافت و تبدیل ویدیو به صوت.';
+      if (errorMsg.includes('Video unavailable') || errorMsg.includes('does not exist')) {
+        friendlyMsg = 'این ویدیو در یوتیوب موجود نیست یا حذف شده است.';
+      } else if (errorMsg.includes('Private video')) {
+        friendlyMsg = 'این ویدیو خصوصی (Private) است و امکان استخراج آن وجود ندارد.';
+      } else if (errorMsg.includes('Sign in to confirm')) {
+        friendlyMsg = 'یوتیوب نیاز به تایید دارد؛ لطفاً از لینک‌های عمومی یا لینک مستقیم فایل استفاده کنید.';
+      } else if (errorMsg.includes('Requested format is not available')) {
+        friendlyMsg = 'فرمت مناسب صوتی برای این ویدیو یافت نشد.';
+      } else if (errorMsg.includes('timed out')) {
+        friendlyMsg = 'مدت زمان استخراج از یوتیوب به پایان رسید (Timeout).';
+      }
       return res.status(400).json({
-        error:
-          'کلیدهای استوریج ابر آروان تنظیم نشده‌اند. ابتدا کلیدها را در بخش تنظیمات ابر آروان وارد کنید.',
+        error: friendlyMsg,
+        details: errorMsg.slice(0, 300),
       });
     }
 
-    // Standard URL response (for YouTube / web items)
-    const s3Key = `incoming/youtube/${Date.now()}.mp3`;
-    const publicUrl = resolvePublicUrl(s3Key);
+    // Parse metadata from yt-dlp JSON output
+    let meta: any = {};
+    try {
+      const firstLine = stdout.trim().split('\n')[0];
+      if (firstLine) {
+        meta = JSON.parse(firstLine);
+      }
+    } catch (parseErr) {
+      console.warn('[Extract] Could not parse yt-dlp metadata JSON:', parseErr);
+    }
 
-    res.json({
+    // Locate generated MP3 file
+    const files = fs.readdirSync(tempDir);
+    const audioFileName = files.find((f) => f.endsWith('.mp3'));
+    if (!audioFileName) {
+      throw new Error('فایل صوتی MP3 پس از اتمام پردازش ایجاد نشد.');
+    }
+
+    const audioFilePath = path.join(tempDir, audioFileName);
+    const audioBuffer = fs.readFileSync(audioFilePath);
+    const fileSizeMb = parseFloat((audioBuffer.length / (1024 * 1024)).toFixed(2));
+
+    const finalTitle =
+      (title && String(title).trim()) ||
+      meta.title ||
+      'نوای استخراج شده از یوتیوب';
+
+    const safeSlug = finalTitle
+      .replace(/[^a-zA-Z0-9\u0600-\u06FF_-]/g, '_')
+      .slice(0, 45);
+
+    const s3Key = `incoming/youtube/${Date.now()}_${safeSlug}.mp3`;
+
+    console.log(`[Extract] Uploading extracted MP3 (${fileSizeMb}MB) to ArvanCloud: ${s3Key}`);
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: bucketName,
+        Key: s3Key,
+        Body: audioBuffer,
+        ContentType: 'audio/mpeg',
+        CacheControl: 'public, max-age=31536000',
+        ACL: 'public-read',
+      })
+    );
+
+    const publicAudioUrl = resolvePublicUrl(s3Key);
+
+    // Optional: upload extracted thumbnail if present
+    let publicCoverUrl = meta.thumbnail || '';
+    const thumbFileName = files.find((f) => f.startsWith('thumb.'));
+    if (thumbFileName) {
+      try {
+        const thumbPath = path.join(tempDir, thumbFileName);
+        const thumbBuf = fs.readFileSync(thumbPath);
+        const thumbExt = path.extname(thumbFileName).toLowerCase() || '.jpg';
+        const thumbKey = `incoming/covers/${Date.now()}_cover${thumbExt}`;
+        const thumbMime = thumbExt === '.webp' ? 'image/webp' : 'image/jpeg';
+
+        await s3.send(
+          new PutObjectCommand({
+            Bucket: bucketName,
+            Key: thumbKey,
+            Body: thumbBuf,
+            ContentType: thumbMime,
+            CacheControl: 'public, max-age=31536000',
+            ACL: 'public-read',
+          })
+        );
+        publicCoverUrl = resolvePublicUrl(thumbKey);
+      } catch (thumbUploadErr) {
+        console.warn('[Extract] Thumbnail upload notice:', thumbUploadErr);
+      }
+    }
+
+    return res.json({
       success: true,
       realUpload: true,
-      url: publicUrl,
+      url: publicAudioUrl,
       s3Key,
-      fileSizeMb: bitrate === '320' ? 8.4 : 4.8,
-      title: title || 'نوای استخراج شده',
-      message: 'لینک پردازش و در باکت ابر آروان ثبت شد.',
+      fileSizeMb,
+      title: finalTitle,
+      duration: meta.duration || 210,
+      coverUrl: publicCoverUrl,
+      uploader: meta.uploader || 'یوتیوب',
+      bitrate: `${selectedQuality}bps`,
+      message: `ویدیو با موفقیت دریافت، به MP3 تبدیل و در باکت «${bucketName}» ابر آروان ذخیره شد.`,
     });
   } catch (error: any) {
     console.error('URL Extraction Error:', error);
-    res.status(500).json({
-      error: translateS3Error(error),
+    const friendlyError = translateS3Error(error);
+    return res.status(500).json({
+      error: `خطا در استخراج و آپلود صوت: ${friendlyError}`,
       details: error.message || String(error),
     });
+  } finally {
+    if (tempDir && fs.existsSync(tempDir)) {
+      try {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch (_) {}
+    }
   }
 });
 

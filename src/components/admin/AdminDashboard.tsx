@@ -94,12 +94,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   // YouTube Studio states
   const [ytInputUrl, setYtInputUrl] = useState('');
+  const [ytCustomTitle, setYtCustomTitle] = useState('');
   const [ytReciterId, setYtReciterId] = useState(reciters[0]?.id || '');
   const [ytCategoryId, setYtCategoryId] = useState(categories[1]?.id || '');
   const [ytBitrate, setYtBitrate] = useState<'128' | '320'>('320');
   const [isYtProcessing, setIsYtProcessing] = useState(false);
   const [ytProcessStep, setYtProcessStep] = useState<string>('');
   const [ytProcessProgress, setYtProcessProgress] = useState<number>(0);
+  const [ytErrorMessage, setYtErrorMessage] = useState<string | null>(null);
+  const [ytSuccessMessage, setYtSuccessMessage] = useState<string | null>(null);
   const [isSyncingChannels, setIsSyncingChannels] = useState(false);
 
   // Real Backend Cloud Storage Status
@@ -586,42 +589,64 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }, 1800);
   };
 
-  // Handler for Single Instant YouTube/Web URL Extraction
-  const handleExtractFromYouTubeOrWeb = (e: React.FormEvent) => {
+  // Handler for Single Instant YouTube/Web URL Extraction (Real backend conversion and ArvanCloud S3 upload)
+  const handleExtractFromYouTubeOrWeb = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!ytInputUrl.trim()) return;
+    if (!ytInputUrl.trim() || isYtProcessing) return;
 
     setIsYtProcessing(true);
-    setYtProcessProgress(15);
-    setYtProcessStep('در حال دریافت متادیتا از یوتیوب و تحلیل استریم صوتی...');
+    setYtErrorMessage(null);
+    setYtSuccessMessage(null);
+    setYtProcessProgress(12);
+    setYtProcessStep('ارتباط با سرور و آماده‌سازی موتور دریافت (yt-dlp)...');
 
-    setTimeout(() => {
-      setYtProcessProgress(45);
-      setYtProcessStep('دانلود استریم صوتی با کیفیت انتخابی (' + ytBitrate + ' kbps)...');
-    }, 800);
+    // Smooth progress simulation while backend downloads and converts
+    const progressTimer = setInterval(() => {
+      setYtProcessProgress((prev) => {
+        if (prev < 30) {
+          setYtProcessStep('دریافت اطلاعات متادیتا و دانلود استریم صوتی از یوتیوب...');
+          return prev + 8;
+        } else if (prev < 65) {
+          setYtProcessStep(`تبدیل استریم به فایل صوتی MP3 (${ytBitrate}kbps) با موتور FFmpeg...`);
+          return prev + 10;
+        } else if (prev < 88) {
+          setYtProcessStep('ارسال مستقیم فایل صوتی تبدیل‌شده به باکت S3 ابر آروان...');
+          return prev + 4;
+        }
+        return prev;
+      });
+    }, 1200);
 
-    setTimeout(() => {
-      setYtProcessProgress(75);
-      setYtProcessStep('تبدیل به فرمت MP3 با ffmpeg و استخراج تصویر کاور (Thumbnail)...');
-    }, 1600);
-
-    setTimeout(() => {
-      setYtProcessProgress(90);
-      setYtProcessStep('ارسال استریم مستقیم به باکت S3 ابر آروان (Content-Type: audio/mpeg)...');
-    }, 2400);
-
-    setTimeout(() => {
-      setYtProcessProgress(100);
-      setYtProcessStep('تکمیل شد! ثبت رکورد در پایگاه داده Supabase...');
-
+    try {
       const selectedRec = reciters.find((r) => r.id === ytReciterId) || reciters[0];
       const selectedCat = categories.find((c) => c.id === ytCategoryId) || categories[1];
 
-      // Generate a realistic title from URL or default
-      let generatedTitle = `نوای صوتی استخراج شده از یوتیوب (${selectedRec.name})`;
-      if (ytInputUrl.toLowerCase().includes('karimi')) generatedTitle = `شور: به سمت دریا (کیفیت عالی استودیویی)`;
-      else if (ytInputUrl.toLowerCase().includes('motiee')) generatedTitle = `نجوا با شهدا: یاد امام و شهدا دل و می‌بره به کربلا`;
-      else if (ytInputUrl.toLowerCase().includes('ziyarat')) generatedTitle = `قرائت زیارت عاشورا با کیفیت استودیویی یوتیوب`;
+      const res = await fetch('/api/extract-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: ytInputUrl.trim(),
+          title: ytCustomTitle.trim(),
+          reciterName: selectedRec.name,
+          categoryId: selectedCat.id,
+          bitrate: ytBitrate,
+        }),
+      });
+
+      clearInterval(progressTimer);
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'خطا در تبدیل و آپلود به ابر آروان');
+      }
+
+      setYtProcessProgress(100);
+      setYtProcessStep('با موفقیت انجام شد! ذخیره در باکت ابر آروان...');
+
+      const generatedTitle =
+        data.title ||
+        (ytCustomTitle.trim() || `نوای صوتی استخراج شده از یوتیوب (${selectedRec.name})`);
 
       const newTrack: Track = {
         id: `queue-yt-${Date.now()}`,
@@ -631,39 +656,65 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         categoryId: selectedCat.id,
         categoryName: selectedCat.name,
         occasion: 'استخراج مستقیم از یوتیوب',
-        duration: 390,
-        audioUrl: 'https://cdn.islamic.network/quran/audio/128/ar.alafasy/67.mp3',
-        coverUrl: '',
-        fileSizeMb: ytBitrate === '320' ? 8.9 : 4.5,
+        duration: data.duration || 210,
+        audioUrl: data.url, // Real ArvanCloud S3 public URL
+        coverUrl: data.coverUrl || '',
+        fileSizeMb: data.fileSizeMb || (ytBitrate === '320' ? 8.5 : 4.5),
         bitrate: `${ytBitrate} kbps`,
         status: 'pending',
         sourceType: 'youtube',
         sourceUrl: ytInputUrl.trim(),
-        sourceChannelName: 'یوتیوب (استخراج دستی)',
+        sourceChannelName: data.uploader || 'یوتیوب (استخراج مستقیم)',
         playCount: 0,
         createdAt: 'همین الان (استودیو یوتیوب)',
-        s3Key: `incoming/youtube/manual_${Date.now()}.mp3`,
-        tags: [selectedRec.name, 'یوتیوب', 'کیفیت استودیویی'],
+        s3Key: data.s3Key || `incoming/youtube/${Date.now()}.mp3`,
+        tags: [selectedRec.name, 'یوتیوب', `${ytBitrate} kbps`, 'ابر آروان'],
         lyrics: [],
       };
 
       setPendingQueue((prev) => [newTrack, ...prev]);
+      setYtSuccessMessage(
+        `صوت با موفقیت از «${data.uploader || 'یوتیوب'}» استخراج، به MP3 تبدیل و در باکت ابر آروان (${data.fileSizeMb} مگابایت) ذخیره شد!`
+      );
       setLogs((prev) => [
         {
           id: `log-${Date.now()}`,
           timestamp: new Date().toLocaleTimeString('fa-IR'),
           channel: 'یوتیوب استودیو',
-          message: `لینک «${ytInputUrl.slice(0, 35)}...» با موفقیت تبدیل و به باکت ابر آروان فرستاده شد.`,
+          message: `فایل «${generatedTitle}» تبدیل و به ابر آروان ارسال شد: ${data.url}`,
           level: 'success',
         },
         ...prev,
       ]);
 
-      setIsYtProcessing(false);
       setYtInputUrl('');
+      setYtCustomTitle('');
+      setTimeout(() => {
+        setIsYtProcessing(false);
+        setYtProcessStep('');
+        setYtProcessProgress(0);
+      }, 1500);
+
+      // Refresh real Arvan S3 files in admin
+      fetchSyncedFiles();
+    } catch (err: any) {
+      clearInterval(progressTimer);
+      setIsYtProcessing(false);
       setYtProcessStep('');
       setYtProcessProgress(0);
-    }, 3200);
+      const errMsg = err.message || 'خطا در ارتباط با سرور یا پردازش ویدیو';
+      setYtErrorMessage(errMsg);
+      setLogs((prev) => [
+        {
+          id: `log-${Date.now()}`,
+          timestamp: new Date().toLocaleTimeString('fa-IR'),
+          channel: 'یوتیوب استودیو',
+          message: `خطا در استخراج از یوتیوب: ${errMsg}`,
+          level: 'error',
+        },
+        ...prev,
+      ]);
+    }
   };
 
 
@@ -1500,7 +1551,11 @@ USING (true);
                     required
                     dir="ltr"
                     value={ytInputUrl}
-                    onChange={(e) => setYtInputUrl(e.target.value)}
+                    onChange={(e) => {
+                      setYtInputUrl(e.target.value);
+                      if (ytErrorMessage) setYtErrorMessage(null);
+                      if (ytSuccessMessage) setYtSuccessMessage(null);
+                    }}
                     placeholder="https://www.youtube.com/watch?v=... یا https://youtu.be/..."
                     className="w-full pr-4 pl-24 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs sm:text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-rose-500 font-mono"
                   />
@@ -1517,6 +1572,20 @@ USING (true);
                     چسباندن (Paste)
                   </button>
                 </div>
+              </div>
+
+              {/* Optional Custom Title */}
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                  عنوان دلخواه نوای صوتی (اختیاری - در صورت خالی ماندن، عنوان خود ویدیو از یوتیوب استخراج می‌شود)
+                </label>
+                <input
+                  type="text"
+                  value={ytCustomTitle}
+                  onChange={(e) => setYtCustomTitle(e.target.value)}
+                  placeholder="مثال: مناجات با امام زمان (عج) - شب جمعه"
+                  className="w-full px-4 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs sm:text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-rose-500"
+                />
               </div>
 
               {/* Settings row */}
@@ -1588,6 +1657,31 @@ USING (true);
                 </div>
               </div>
 
+              {/* Error Banner */}
+              {ytErrorMessage && (
+                <div className="p-3.5 bg-rose-950/80 border border-rose-500/50 rounded-xl text-xs text-rose-300 flex items-start gap-2.5">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <div className="font-bold text-rose-200">خطا در پردازش یا استخراج لینک:</div>
+                    <div className="text-slate-300">{ytErrorMessage}</div>
+                  </div>
+                </div>
+              )}
+
+              {/* Success Banner */}
+              {ytSuccessMessage && (
+                <div className="p-3.5 bg-emerald-950/80 border border-emerald-500/50 rounded-xl text-xs text-emerald-300 flex items-start gap-2.5">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <div className="font-bold text-emerald-200">استخراج و آپلود با موفقیت انجام شد:</div>
+                    <div className="text-slate-300">{ytSuccessMessage}</div>
+                    <div className="text-[11px] text-emerald-400/80 mt-1">
+                      می‌توانید هم‌اکنون این قطعه را در تب «صف رسانه‌ها» گوش دهید یا مستقیماً منتشر نمایید.
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Progress bar when converting */}
               {isYtProcessing && (
                 <div className="p-4 bg-slate-950 rounded-xl border border-rose-500/40 space-y-2">
@@ -1613,7 +1707,11 @@ USING (true);
                 className="w-full py-3 bg-gradient-to-l from-rose-600 to-rose-700 hover:from-rose-500 hover:to-rose-600 text-white font-bold text-xs sm:text-sm rounded-xl shadow-lg shadow-rose-600/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
               >
                 <Youtube className="w-4 h-4" />
-                <span>شروع استخراج صوت، تبدیل به MP3 و ارسال به باکت ابر آروان</span>
+                <span>
+                  {isYtProcessing
+                    ? 'در حال پردازش و آپلود به ابر آروان...'
+                    : 'شروع استخراج صوت، تبدیل به MP3 و ارسال به باکت ابر آروان'}
+                </span>
               </button>
             </form>
           </div>
