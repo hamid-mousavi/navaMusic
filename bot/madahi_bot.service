@@ -1,0 +1,18 @@
+# فایل سرویس Systemd جهت اجرای خودکار ربات در پس‌زمینه لینوکس (Ubuntu/Debian)
+# مسیر قرارگیری در سرور: /etc/systemd/system/madahi-bot.service
+
+[Unit]
+Description=Madahi Telegram Scraper Bot & ArvanCloud S3 Vault
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/madahi-bot
+ExecStart=/usr/bin/python3 /opt/madahi-bot/telegram_scraper.py
+Restart=always
+RestartSec=10
+EnvironmentFile=/opt/madahi-bot/.env
+
+[Install]
+WantedBy=multi-user.target

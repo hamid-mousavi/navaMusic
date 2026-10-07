@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  madahi-scraper:
+    build: .
+    container_name: madahi_telegram_scraper
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      # ذخیره فایل سشن تلگرام به صورت دائمی در هاست
+      - ./madahi_session.session:/app/madahi_session.session
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

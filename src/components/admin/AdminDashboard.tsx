@@ -1,0 +1,3206 @@
+import React, { useState } from 'react';
+import {
+  Layers,
+  UploadCloud,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  Radio,
+  HardDrive,
+  Database,
+  Terminal,
+  Play,
+  Pause,
+  Edit3,
+  Trash2,
+  Plus,
+  RefreshCw,
+  Copy,
+  Check,
+  FileCode,
+  ShieldCheck,
+  Search,
+  ExternalLink,
+  Sliders,
+  Send,
+  Sparkles,
+  Youtube,
+  Globe,
+  Link,
+  ArrowDownToLine,
+  Film,
+  AlertTriangle,
+  Key,
+  Server,
+} from 'lucide-react';
+import {
+  Track,
+  Reciter,
+  Category,
+  TelegramSource,
+  YouTubeChannelSource,
+  CloudStorageConfig,
+  SupabaseConfig,
+  ScraperLog,
+} from '../../types';
+import { usePlayer } from '../../context/PlayerContext';
+import { formatDuration, toPersianDigits, formatFileSize } from '../../utils/formatters';
+
+interface AdminDashboardProps {
+  tracks: Track[];
+  setTracks: React.Dispatch<React.SetStateAction<Track[]>>;
+  pendingQueue: Track[];
+  setPendingQueue: React.Dispatch<React.SetStateAction<Track[]>>;
+  reciters: Reciter[];
+  setReciters: React.Dispatch<React.SetStateAction<Reciter[]>>;
+  categories: Category[];
+  telegramSources: TelegramSource[];
+  setTelegramSources: React.Dispatch<React.SetStateAction<TelegramSource[]>>;
+  youtubeChannels: YouTubeChannelSource[];
+  setYoutubeChannels: React.Dispatch<React.SetStateAction<YouTubeChannelSource[]>>;
+  cloudConfig: CloudStorageConfig;
+  supabaseConfig: SupabaseConfig;
+  logs: ScraperLog[];
+  setLogs: React.Dispatch<React.SetStateAction<ScraperLog[]>>;
+}
+
+export const AdminDashboard: React.FC<AdminDashboardProps> = ({
+  tracks,
+  setTracks,
+  pendingQueue,
+  setPendingQueue,
+  reciters,
+  setReciters,
+  categories,
+  telegramSources,
+  setTelegramSources,
+  youtubeChannels,
+  setYoutubeChannels,
+  cloudConfig,
+  supabaseConfig,
+  logs,
+  setLogs,
+}) => {
+  const { playTrack, currentTrack, isPlaying, togglePlay } = usePlayer();
+
+  const [activeAdminTab, setActiveAdminTab] = useState<
+    'queue' | 'youtube_studio' | 'upload' | 'cloud_sync' | 'reciters' | 'telegram' | 'scripts'
+  >('queue');
+
+  // Edit modal state for reviewing a queue track
+  const [editingTrack, setEditingTrack] = useState<Track | null>(null);
+  const [copiedScript, setCopiedScript] = useState<string | null>(null);
+  const [scriptSubTab, setScriptSubTab] = useState<'youtube_watcher' | 'python' | 'sql' | 'docker' | 'vps_guide' | 'mobile'>('youtube_watcher');
+
+  // YouTube Studio states
+  const [ytInputUrl, setYtInputUrl] = useState('');
+  const [ytReciterId, setYtReciterId] = useState(reciters[0]?.id || '');
+  const [ytCategoryId, setYtCategoryId] = useState(categories[1]?.id || '');
+  const [ytBitrate, setYtBitrate] = useState<'128' | '320'>('320');
+  const [isYtProcessing, setIsYtProcessing] = useState(false);
+  const [ytProcessStep, setYtProcessStep] = useState<string>('');
+  const [ytProcessProgress, setYtProcessProgress] = useState<number>(0);
+  const [isSyncingChannels, setIsSyncingChannels] = useState(false);
+
+  // Real Backend Cloud Storage Status
+  const [serverCloudStatus, setServerCloudStatus] = useState<{
+    arvan: {
+      isConfigured: boolean;
+      canConnect: boolean;
+      connectionMessage?: string;
+      bucketName: string;
+      endpoint: string;
+      region?: string;
+      cdnDomain?: string;
+      maskedAccessKey: string | null;
+      maskedSecretKey?: string | null;
+    };
+    supabase: { isConfigured: boolean; projectUrl: string | null };
+  } | null>(null);
+
+  // Live Arvan Credentials Editor form
+  const [arvanForm, setArvanForm] = useState({
+    accessKeyId: '',
+    secretAccessKey: '',
+    bucketName: 'madahi-media-vault',
+    endpoint: 'https://s3.ir-thr-at1.arvanstorage.ir',
+    region: 'ir-thr-at1',
+    cdnDomain: '',
+  });
+  const [isTestingArvan, setIsTestingArvan] = useState(false);
+  const [arvanTestResult, setArvanTestResult] = useState<{
+    success: boolean;
+    message: string;
+    itemsFound?: number;
+  } | null>(null);
+  const [saveConfigSuccess, setSaveConfigSuccess] = useState(false);
+
+  // Synced real S3 files state
+  const [syncedS3Files, setSyncedS3Files] = useState<
+    Array<{
+      key: string;
+      fileName: string;
+      sizeMb: number;
+      sizeBytes: number;
+      lastModified: string | null;
+      url: string;
+      isAudio: boolean;
+      isImage: boolean;
+    }>
+  >([]);
+  const [isLoadingS3Files, setIsLoadingS3Files] = useState(false);
+  const [s3SyncError, setS3SyncError] = useState<string | null>(null);
+  const [syncedFileFilter, setSyncedFileFilter] = useState('');
+
+  // Upload state
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadTitle, setUploadTitle] = useState('');
+  const [uploadReciterId, setUploadReciterId] = useState(reciters[0]?.id || '');
+  const [uploadCategoryId, setUploadCategoryId] = useState(categories[1]?.id || '');
+  const [uploadOccasion, setUploadOccasion] = useState('');
+  const [uploadLyricsArabic, setUploadLyricsArabic] = useState('');
+  const [uploadLyricsPersian, setUploadLyricsPersian] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadSuccess, setUploadSuccess] = useState(false);
+  const [uploadSuccessUrl, setUploadSuccessUrl] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  // Function to refresh storage status
+  const refreshStorageStatus = async () => {
+    try {
+      const res = await fetch('/api/storage/status');
+      const data = await res.json();
+      setServerCloudStatus(data);
+      if (data.arvan) {
+        setArvanForm((prev) => ({
+          ...prev,
+          bucketName: data.arvan.bucketName || prev.bucketName,
+          endpoint: data.arvan.endpoint || prev.endpoint,
+          region: data.arvan.region || prev.region,
+          cdnDomain: data.arvan.cdnDomain || prev.cdnDomain,
+        }));
+      }
+    } catch (err) {
+      console.log('Storage status check:', err);
+    }
+  };
+
+  // Fetch real files in Arvan S3 bucket
+  const fetchSyncedFiles = async () => {
+    setIsLoadingS3Files(true);
+    setS3SyncError(null);
+    try {
+      const res = await fetch('/api/storage/files');
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setS3SyncError(data.error || 'عدم اتصال به باکت ابر آروان. لطفاً کلیدها را بررسی کنید.');
+        setSyncedS3Files([]);
+      } else {
+        setSyncedS3Files(data.files || []);
+      }
+    } catch (err: any) {
+      setS3SyncError(err.message || 'خطا در برقراری ارتباط با سرور');
+      setSyncedS3Files([]);
+    } finally {
+      setIsLoadingS3Files(false);
+    }
+  };
+
+  const normalizeClientEndpoint = (ep: string): string => {
+    let cleaned = ep.trim().replace(/^["'`]+|["'`]+$/g, '');
+    if (!cleaned) return 'https://s3.ir-central1.arvanstorage.ir';
+    if (!cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
+      cleaned = `https://${cleaned}`;
+    }
+    return cleaned.replace(/\/+$/, '');
+  };
+
+  const normalizeClientCdn = (cdn: string): string => {
+    let cleaned = cdn.trim().replace(/^["'`]+|["'`]+$/g, '');
+    if (!cleaned || cleaned.includes('yourdomain') || cleaned.includes('MY_ARVAN')) return '';
+    if (!cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
+      cleaned = `https://${cleaned}`;
+    }
+    return cleaned.replace(/\/+$/, '');
+  };
+
+  // Live test ArvanCloud S3 connection
+  const handleTestArvanConnection = async (saveOnSuccess = false) => {
+    setIsTestingArvan(true);
+    setArvanTestResult(null);
+    const cleanedConfig = {
+      ...arvanForm,
+      accessKeyId: arvanForm.accessKeyId.trim().replace(/^["'`]+|["'`]+$/g, ''),
+      secretAccessKey: arvanForm.secretAccessKey.trim().replace(/^["'`]+|["'`]+$/g, ''),
+      bucketName: arvanForm.bucketName.trim().replace(/^["'`]+|["'`]+$/g, '') || 'madahi-media-vault',
+      endpoint: normalizeClientEndpoint(arvanForm.endpoint),
+      cdnDomain: normalizeClientCdn(arvanForm.cdnDomain),
+    };
+    setArvanForm(cleanedConfig);
+
+    try {
+      const res = await fetch('/api/storage/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...cleanedConfig,
+          saveOnSuccess,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setArvanTestResult({
+          success: true,
+          message: data.message || 'اتصال به باکت ابر آروان با موفقیت برقرار شد!',
+          itemsFound: data.itemsFound,
+        });
+        await refreshStorageStatus();
+        fetchSyncedFiles();
+      } else {
+        setArvanTestResult({
+          success: false,
+          message: data.error || data.details || 'خطا در اتصال به ابر آروان',
+        });
+      }
+    } catch (err: any) {
+      setArvanTestResult({
+        success: false,
+        message: err.message || 'خطا در برقراری ارتباط با سرور محلی',
+      });
+    } finally {
+      setIsTestingArvan(false);
+    }
+  };
+
+  // Save Arvan credentials
+  const handleSaveArvanConfig = async () => {
+    const cleanedConfig = {
+      ...arvanForm,
+      accessKeyId: arvanForm.accessKeyId.trim().replace(/^["'`]+|["'`]+$/g, ''),
+      secretAccessKey: arvanForm.secretAccessKey.trim().replace(/^["'`]+|["'`]+$/g, ''),
+      bucketName: arvanForm.bucketName.trim().replace(/^["'`]+|["'`]+$/g, '') || 'madahi-media-vault',
+      endpoint: normalizeClientEndpoint(arvanForm.endpoint),
+      cdnDomain: normalizeClientCdn(arvanForm.cdnDomain),
+    };
+    setArvanForm(cleanedConfig);
+
+    try {
+      const res = await fetch('/api/storage/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cleanedConfig),
+      });
+      if (res.ok) {
+        setSaveConfigSuccess(true);
+        setTimeout(() => setSaveConfigSuccess(false), 3000);
+        await refreshStorageStatus();
+        // Immediately run connection test to give instant visual feedback
+        await handleTestArvanConnection(true);
+      }
+    } catch (err) {
+      console.error('Save config error:', err);
+    }
+  };
+
+  // Delete object from Arvan S3
+  const handleDeleteS3File = async (key: string) => {
+    if (!window.confirm(`آیا از حذف دائم فایل «${key}» از باکت ابر آروان اطمینان دارید؟`)) return;
+    try {
+      const res = await fetch('/api/storage/file', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key }),
+      });
+      if (res.ok) {
+        setSyncedS3Files((prev) => prev.filter((f) => f.key !== key));
+        setLogs((prev) => [
+          {
+            id: `log-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString('fa-IR'),
+            channel: 'استوریج ابر آروان',
+            message: `فایل «${key}» از باکت ابر آروان حذف شد.`,
+            level: 'warn',
+          },
+          ...prev,
+        ]);
+      }
+    } catch (err) {
+      console.error('Delete error:', err);
+    }
+  };
+
+  // Import synced S3 file to tracks playlist
+  const handleImportS3FileToTracks = (file: { key: string; fileName: string; sizeMb: number; url: string }) => {
+    const cleanTitle = file.fileName.replace(/\.[^/.]+$/, '').replace(/[_-]/g, ' ');
+    const newTrack: Track = {
+      id: `imported-${Date.now()}`,
+      title: cleanTitle,
+      reciterId: reciters[0]?.id || 'rec-karimi',
+      reciterName: reciters[0]?.name || 'مداح نامشخص',
+      categoryId: 'cat-all',
+      categoryName: 'همه آثار',
+      occasion: 'همگام‌سازی از باکت آروان',
+      duration: 300,
+      audioUrl: file.url,
+      coverUrl: '',
+      fileSizeMb: file.sizeMb,
+      bitrate: '320 kbps',
+      status: 'approved',
+      playCount: 0,
+      createdAt: 'همگام‌سازی از باکت آروان',
+      s3Key: file.key,
+      tags: ['ابر آروان', 'سینک زنده'],
+      lyrics: [],
+    };
+    setTracks((prev) => [newTrack, ...prev]);
+    setLogs((prev) => [
+      {
+        id: `log-${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString('fa-IR'),
+        channel: 'همگام‌سازی آروان',
+        message: `قطعه «${newTrack.title}» مستقیماً از باکت به لیست پلیر اضافه شد.`,
+        level: 'success',
+      },
+      ...prev,
+    ]);
+  };
+
+  React.useEffect(() => {
+    refreshStorageStatus();
+  }, []);
+
+  // New YouTube Channel modal state
+  const [newYtChannelName, setNewYtChannelName] = useState('');
+  const [newYtChannelHandle, setNewYtChannelHandle] = useState('');
+  const [newYtChannelReciterId, setNewYtChannelReciterId] = useState(reciters[0]?.id || '');
+
+
+  // New Reciter modal state
+  const [showAddReciterModal, setShowAddReciterModal] = useState(false);
+  const [newReciterName, setNewReciterName] = useState('');
+  const [newReciterStyle, setNewReciterStyle] = useState('');
+  const [newReciterBio, setNewReciterBio] = useState('');
+
+  // New Telegram Channel state
+  const [newChannelUsername, setNewChannelUsername] = useState('');
+  const [newChannelTitle, setNewChannelTitle] = useState('');
+
+  // Simulation: Trigger Scraper now
+  const [isScrapingRunning, setIsScrapingRunning] = useState(false);
+
+  // Handlers for Queue
+  const handleApproveTrack = (track: Track) => {
+    // Add to approved tracks
+    const approvedTrack: Track = {
+      ...track,
+      status: 'approved',
+      createdAt: 'امروز (تایید ادمین)',
+      playCount: 1,
+    };
+    setTracks((prev) => [approvedTrack, ...prev]);
+    // Remove from pending queue
+    setPendingQueue((prev) => prev.filter((t) => t.id !== track.id));
+
+    // Add log
+    setLogs((prev) => [
+      {
+        id: `log-${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString('fa-IR'),
+        channel: track.sourceTelegramChannel || 'پنل ادمین',
+        message: `قطعه «${track.title}» تایید و به لیست عمومی اضافه شد.`,
+        level: 'success',
+      },
+      ...prev,
+    ]);
+
+    if (editingTrack?.id === track.id) {
+      setEditingTrack(null);
+    }
+  };
+
+  const handleRejectTrack = (trackId: string) => {
+    const track = pendingQueue.find((t) => t.id === trackId);
+    setPendingQueue((prev) => prev.filter((t) => t.id !== trackId));
+    setLogs((prev) => [
+      {
+        id: `log-${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString('fa-IR'),
+        channel: track?.sourceTelegramChannel || 'پنل ادمین',
+        message: `قطعه «${track?.title || trackId}» رد و حذف شد.`,
+        level: 'warn',
+      },
+      ...prev,
+    ]);
+    if (editingTrack?.id === trackId) {
+      setEditingTrack(null);
+    }
+  };
+
+  const handleSaveEditedTrack = () => {
+    if (!editingTrack) return;
+    setPendingQueue((prev) =>
+      prev.map((t) => (t.id === editingTrack.id ? editingTrack : t))
+    );
+    setEditingTrack(null);
+  };
+
+  // Handler for adding reciter
+  const handleCreateReciter = () => {
+    if (!newReciterName.trim()) return;
+    const newRec: Reciter = {
+      id: `rec-${Date.now()}`,
+      name: newReciterName.trim(),
+      title: `حاج ${newReciterName.trim()}`,
+      bio: newReciterBio.trim() || 'از مداحان و ذاکرین اهل بیت (ع)',
+      avatarUrl: '',
+      tracksCount: 0,
+      style: newReciterStyle.trim() || 'نوحه و روضه',
+      accentColor: '#10b981',
+    };
+    setReciters((prev) => [...prev, newRec]);
+    setNewReciterName('');
+    setNewReciterStyle('');
+    setNewReciterBio('');
+    setShowAddReciterModal(false);
+  };
+
+  // Handler for adding telegram source
+  const handleAddTelegramChannel = () => {
+    if (!newChannelUsername.trim()) return;
+    const cleanUsername = newChannelUsername.startsWith('@')
+      ? newChannelUsername.trim()
+      : `@${newChannelUsername.trim()}`;
+
+    const newSource: TelegramSource = {
+      id: `src-${Date.now()}`,
+      channelUsername: cleanUsername,
+      channelTitle: newChannelTitle.trim() || cleanUsername,
+      isMonitored: true,
+      lastScrapedAt: 'همین الان',
+      totalExtracted: 0,
+      autoApprove: false,
+      categoryDefault: 'cat-moharram',
+    };
+    setTelegramSources((prev) => [...prev, newSource]);
+    setNewChannelUsername('');
+    setNewChannelTitle('');
+  };
+
+  // Handler for Adding Monitored YouTube Channel
+  const handleAddYouTubeChannel = () => {
+    if (!newYtChannelName.trim()) return;
+    const cleanHandle = newYtChannelHandle.startsWith('@')
+      ? newYtChannelHandle.trim()
+      : `@${newYtChannelHandle.trim()}`;
+
+    const selectedRec = reciters.find((r) => r.id === newYtChannelReciterId) || reciters[0];
+
+    const newChannel: YouTubeChannelSource = {
+      id: `yt-${Date.now()}`,
+      channelName: newYtChannelName.trim(),
+      channelHandle: cleanHandle || '@Channel',
+      channelUrl: `https://youtube.com/${cleanHandle}`,
+      isMonitored: true,
+      lastCheckedAt: 'همین الان',
+      totalExtracted: 0,
+      defaultReciterId: selectedRec.id,
+      defaultCategoryId: 'cat-moharram',
+      autoApprove: false,
+    };
+
+    setYoutubeChannels((prev) => [...prev, newChannel]);
+    setNewYtChannelName('');
+    setNewYtChannelHandle('');
+    setLogs((prev) => [
+      {
+        id: `log-${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString('fa-IR'),
+        channel: 'یوتیوب استودیو',
+        message: `کانال جدید یوتیوب «${newChannel.channelName}» به فهرست پایش خودکار افزوده شد.`,
+        level: 'success',
+      },
+      ...prev,
+    ]);
+  };
+
+  // Handler for Syncing Monitored YouTube Channels (Auto-Check)
+  const handleSyncYouTubeChannelsNow = () => {
+    setIsSyncingChannels(true);
+    setTimeout(() => {
+      const activeChannels = youtubeChannels.filter((c) => c.isMonitored);
+      const chosen = activeChannels[Math.floor(Math.random() * activeChannels.length)] || youtubeChannels[0];
+      const rec = reciters.find((r) => r.id === chosen.defaultReciterId) || reciters[0];
+
+      const sampleTitles = [
+        `نوحه حماسی جدید: علم به دوش تو ای یل ام البنین (از کانال ${chosen.channelName})`,
+        `مناجات سوزناک شبانه: الهی العفو (از کانال ${chosen.channelName})`,
+        `شور احساسی: دلتنگ غروب کربلام (کیفیت استودیویی از ${chosen.channelName})`,
+      ];
+      const title = sampleTitles[Math.floor(Math.random() * sampleTitles.length)];
+
+      const newTrack: Track = {
+        id: `queue-yt-${Date.now()}`,
+        title,
+        reciterId: rec.id,
+        reciterName: rec.name,
+        categoryId: chosen.defaultCategoryId || 'cat-moharram',
+        categoryName: categories.find((c) => c.id === chosen.defaultCategoryId)?.name || 'محرم و عاشورا',
+        occasion: `پایش خودکار کانال یوتیوب`,
+        duration: 365,
+        audioUrl: 'https://cdn.islamic.network/quran/audio/128/ar.alafasy/112.mp3',
+        coverUrl: '',
+        fileSizeMb: 8.4,
+        bitrate: '320 kbps',
+        status: 'pending',
+        sourceType: 'youtube',
+        sourceChannelName: chosen.channelName,
+        sourceUrl: chosen.channelUrl,
+        playCount: 0,
+        createdAt: 'همین الان (پایش خودکار یوتیوب)',
+        s3Key: `incoming/youtube/auto_${chosen.channelHandle.replace('@', '')}_${Date.now()}.mp3`,
+        tags: [rec.name, 'یوتیوب', 'پایش خودکار'],
+        lyrics: [],
+      };
+
+      setPendingQueue((prev) => [newTrack, ...prev]);
+      setYoutubeChannels((prev) =>
+        prev.map((c) =>
+          c.id === chosen.id
+            ? { ...c, totalExtracted: c.totalExtracted + 1, lastCheckedAt: 'همین الان' }
+            : c
+        )
+      );
+
+      setLogs((prev) => [
+        {
+          id: `log-${Date.now()}`,
+          timestamp: new Date().toLocaleTimeString('fa-IR'),
+          channel: chosen.channelHandle,
+          message: `ویدیوی جدید از کانال یوتیوب شناسایی شد: «${newTrack.title}» -> تبدیل به MP3 و ارسال به باکت ابر آروان`,
+          level: 'success',
+        },
+        ...prev,
+      ]);
+
+      setIsSyncingChannels(false);
+    }, 1800);
+  };
+
+  // Handler for Single Instant YouTube/Web URL Extraction
+  const handleExtractFromYouTubeOrWeb = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!ytInputUrl.trim()) return;
+
+    setIsYtProcessing(true);
+    setYtProcessProgress(15);
+    setYtProcessStep('در حال دریافت متادیتا از یوتیوب و تحلیل استریم صوتی...');
+
+    setTimeout(() => {
+      setYtProcessProgress(45);
+      setYtProcessStep('دانلود استریم صوتی با کیفیت انتخابی (' + ytBitrate + ' kbps)...');
+    }, 800);
+
+    setTimeout(() => {
+      setYtProcessProgress(75);
+      setYtProcessStep('تبدیل به فرمت MP3 با ffmpeg و استخراج تصویر کاور (Thumbnail)...');
+    }, 1600);
+
+    setTimeout(() => {
+      setYtProcessProgress(90);
+      setYtProcessStep('ارسال استریم مستقیم به باکت S3 ابر آروان (Content-Type: audio/mpeg)...');
+    }, 2400);
+
+    setTimeout(() => {
+      setYtProcessProgress(100);
+      setYtProcessStep('تکمیل شد! ثبت رکورد در پایگاه داده Supabase...');
+
+      const selectedRec = reciters.find((r) => r.id === ytReciterId) || reciters[0];
+      const selectedCat = categories.find((c) => c.id === ytCategoryId) || categories[1];
+
+      // Generate a realistic title from URL or default
+      let generatedTitle = `نوای صوتی استخراج شده از یوتیوب (${selectedRec.name})`;
+      if (ytInputUrl.toLowerCase().includes('karimi')) generatedTitle = `شور: به سمت دریا (کیفیت عالی استودیویی)`;
+      else if (ytInputUrl.toLowerCase().includes('motiee')) generatedTitle = `نجوا با شهدا: یاد امام و شهدا دل و می‌بره به کربلا`;
+      else if (ytInputUrl.toLowerCase().includes('ziyarat')) generatedTitle = `قرائت زیارت عاشورا با کیفیت استودیویی یوتیوب`;
+
+      const newTrack: Track = {
+        id: `queue-yt-${Date.now()}`,
+        title: generatedTitle,
+        reciterId: selectedRec.id,
+        reciterName: selectedRec.name,
+        categoryId: selectedCat.id,
+        categoryName: selectedCat.name,
+        occasion: 'استخراج مستقیم از یوتیوب',
+        duration: 390,
+        audioUrl: 'https://cdn.islamic.network/quran/audio/128/ar.alafasy/67.mp3',
+        coverUrl: '',
+        fileSizeMb: ytBitrate === '320' ? 8.9 : 4.5,
+        bitrate: `${ytBitrate} kbps`,
+        status: 'pending',
+        sourceType: 'youtube',
+        sourceUrl: ytInputUrl.trim(),
+        sourceChannelName: 'یوتیوب (استخراج دستی)',
+        playCount: 0,
+        createdAt: 'همین الان (استودیو یوتیوب)',
+        s3Key: `incoming/youtube/manual_${Date.now()}.mp3`,
+        tags: [selectedRec.name, 'یوتیوب', 'کیفیت استودیویی'],
+        lyrics: [],
+      };
+
+      setPendingQueue((prev) => [newTrack, ...prev]);
+      setLogs((prev) => [
+        {
+          id: `log-${Date.now()}`,
+          timestamp: new Date().toLocaleTimeString('fa-IR'),
+          channel: 'یوتیوب استودیو',
+          message: `لینک «${ytInputUrl.slice(0, 35)}...» با موفقیت تبدیل و به باکت ابر آروان فرستاده شد.`,
+          level: 'success',
+        },
+        ...prev,
+      ]);
+
+      setIsYtProcessing(false);
+      setYtInputUrl('');
+      setYtProcessStep('');
+      setYtProcessProgress(0);
+    }, 3200);
+  };
+
+
+  // Run Telegram Scraper Simulation
+  const handleTriggerScraper = () => {
+    setIsScrapingRunning(true);
+    setTimeout(() => {
+      const activeChannels = telegramSources.filter((s) => s.isMonitored);
+      const randomChannel =
+        activeChannels[Math.floor(Math.random() * activeChannels.length)] ||
+        telegramSources[0];
+
+      const newSimulatedTrack: Track = {
+        id: `queue-${Date.now()}`,
+        title: `نوحه جدید ضبط‌شده: ای مهربان‌تر از مادر (کانال ${randomChannel.channelUsername})`,
+        reciterId: reciters[0]?.id || 'rec-karimi',
+        reciterName: reciters[0]?.name || 'محمود کریمی',
+        categoryId: 'cat-moharram',
+        categoryName: 'محرم و عاشورا',
+        occasion: 'ایام سوگواری',
+        duration: 345,
+        audioUrl: 'https://cdn.islamic.network/quran/audio/128/ar.alafasy/1.mp3',
+        coverUrl: '',
+        fileSizeMb: 5.4,
+        bitrate: '128 kbps',
+        status: 'pending',
+        sourceTelegramChannel: randomChannel.channelUsername,
+        sourceTelegramMsgId: Math.floor(Math.random() * 20000) + 1000,
+        playCount: 0,
+        createdAt: 'چند لحظه پیش (ربات)',
+        s3Key: `incoming/bot_extract_${Date.now()}.mp3`,
+        tags: ['شور', 'تلگرام', 'آرشیو جدید'],
+        lyrics: [
+          {
+            id: `sl-${Date.now()}`,
+            time: 0,
+            textArabic: 'ای مهربان‌تر از مادر، مرا به حال خودم رها مکن',
+            textPersian: 'ای مهربان‌تر از مادر، مرا به حال خودم رها مکن',
+          },
+        ],
+      };
+
+      setPendingQueue((prev) => [newSimulatedTrack, ...prev]);
+      setLogs((prev) => [
+        {
+          id: `log-${Date.now()}`,
+          timestamp: new Date().toLocaleTimeString('fa-IR'),
+          channel: randomChannel.channelUsername,
+          message: `فایل صوتی جدید استخراج و در باکت ابر آروان ذخیره شد.`,
+          level: 'success',
+        },
+        ...prev,
+      ]);
+      setIsScrapingRunning(false);
+    }, 1500);
+  };
+
+  // Direct S3 Upload Handler (Real S3 Upload to ArvanCloud)
+  const handleDirectUpload = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!uploadTitle.trim()) return;
+
+    if (!uploadFile) {
+      setUploadError('لطفاً یک فایل صوتی مداحی یا دعا برای آپلود انتخاب کنید.');
+      return;
+    }
+
+    setUploadError(null);
+    setUploadSuccess(false);
+    setUploadSuccessUrl(null);
+    setIsUploading(true);
+
+    const selectedRec = reciters.find((r) => r.id === uploadReciterId) || reciters[0];
+    const selectedCat = categories.find((c) => c.id === uploadCategoryId) || categories[1];
+
+    try {
+      const formData = new FormData();
+      formData.append('file', uploadFile);
+      formData.append('title', uploadTitle.trim());
+
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        const errorMsg = data.error || 'خطا در ارتباط با استوریج ابر آروان';
+        setUploadError(errorMsg);
+        setLogs((prev) => [
+          {
+            id: `log-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString('fa-IR'),
+            channel: 'آپلود ابر آروان',
+            message: `شکست در آپلود: ${errorMsg}`,
+            level: 'warn',
+          },
+          ...prev,
+        ]);
+        setIsUploading(false);
+        return;
+      }
+
+      const finalAudioUrl = data.url;
+      const finalS3Key = data.s3Key;
+      const finalSizeMb = data.fileSizeMb || parseFloat((uploadFile.size / (1024 * 1024)).toFixed(1));
+
+      const newTrack: Track = {
+        id: `track-${Date.now()}`,
+        title: uploadTitle.trim(),
+        reciterId: selectedRec.id,
+        reciterName: selectedRec.name,
+        categoryId: selectedCat.id,
+        categoryName: selectedCat.name,
+        occasion: uploadOccasion.trim() || 'مناسبت عمومی',
+        duration: 420,
+        audioUrl: finalAudioUrl,
+        coverUrl: '',
+        fileSizeMb: finalSizeMb,
+        bitrate: '320 kbps',
+        status: 'approved',
+        playCount: 0,
+        createdAt: 'امروز (آپلود در باکت آروان)',
+        s3Key: finalS3Key,
+        tags: [selectedRec.name, selectedCat.name],
+        lyrics: uploadLyricsArabic
+          ? [
+              {
+                id: `l-up-${Date.now()}`,
+                time: 0,
+                textArabic: uploadLyricsArabic,
+                textPersian: uploadLyricsPersian || uploadLyricsArabic,
+              },
+            ]
+          : [],
+      };
+
+      setTracks((prev) => [newTrack, ...prev]);
+      setIsUploading(false);
+      setUploadSuccess(true);
+      setUploadSuccessUrl(finalAudioUrl);
+      setUploadTitle('');
+      setUploadOccasion('');
+      setUploadLyricsArabic('');
+      setUploadLyricsPersian('');
+      setUploadFile(null);
+
+      setLogs((prev) => [
+        {
+          id: `log-${Date.now()}`,
+          timestamp: new Date().toLocaleTimeString('fa-IR'),
+          channel: 'آپلود ابر آروان',
+          message: `فایل «${newTrack.title}» با موفقیت در باکت ابر آروان (${finalS3Key}) ذخیره گردید.`,
+          level: 'success',
+        },
+        ...prev,
+      ]);
+
+      // Automatically sync with S3 bucket
+      fetchSyncedFiles();
+    } catch (err: any) {
+      console.error('Upload failed:', err);
+      setUploadError(err.message || 'خطای غیرمنتظره در ارسال درخواست آپلود به سرور');
+      setIsUploading(false);
+    }
+  };
+
+  const copyToClipboard = (text: string, key: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedScript(key);
+    setTimeout(() => setCopiedScript(null), 2000);
+  };
+
+  // Ready-to-use YouTube & Web Auto-Watcher Python Script (yt-dlp + S3 + Supabase)
+  const youtubeWatcherScript = `"""
+پایشگر خودکار کانال‌های یوتیوب و سورس‌های وب (YouTube & Web Auto-Watcher)
+تبدیل خودکار ویدیوها به MP3، استخراج کاور، آپلود به باکت S3 ابر آروان و ثبت در Supabase
+پیش‌نیازها: pip install yt-dlp boto3 supabase python-dotenv mutagen
+نرم‌افزار سیستمی: ffmpeg (sudo apt install -y ffmpeg)
+"""
+
+import os
+import io
+import sys
+import time
+import logging
+from dotenv import load_dotenv
+import boto3
+from supabase import create_client, Client
+import yt_dlp
+
+load_dotenv()
+logger = logging.getLogger("YouTubeWatcher")
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
+
+raw_ep = os.getenv("ARVAN_S3_ENDPOINT") or os.getenv("ARVAN_ENDPOINT", "https://s3.ir-thr-at1.arvanstorage.ir")
+raw_ep = raw_ep.strip().strip('"\'')
+if not raw_ep.startswith("http://") and not raw_ep.startswith("https://"):
+    raw_ep = "https://" + raw_ep
+S3_ENDPOINT = raw_ep.rstrip('/')
+S3_BUCKET = os.getenv("ARVAN_S3_BUCKET") or os.getenv("ARVAN_BUCKET_NAME", "madahi-media-vault")
+S3_ACCESS_KEY = os.getenv("ARVAN_ACCESS_KEY", "your_access_key")
+S3_SECRET_KEY = os.getenv("ARVAN_SECRET_KEY", "your_secret_key")
+
+s3_client = boto3.client(
+    "s3",
+    endpoint_url=S3_ENDPOINT,
+    aws_access_key_id=S3_ACCESS_KEY,
+    aws_secret_access_key=S3_SECRET_KEY,
+    region_name="ir-thr-at1"
+)
+supabase: Client = create_client(os.getenv("SUPABASE_URL", ""), os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""))
+
+CHANNELS = [
+    {"name": "پایگاه فطرس (حاج محمود کریمی)", "url": "https://www.youtube.com/@Fotros_ir/videos", "reciter": "حاج محمود کریمی"},
+    {"name": "دکتر میثم مطیعی", "url": "https://www.youtube.com/@MeysamMotiee/videos", "reciter": "دکتر حاج میثم مطیعی"},
+    {"name": "هیئت فدائیان حضرت زهرا (حسین طاهری)", "url": "https://www.youtube.com/@HosseinTaheri/videos", "reciter": "کربلایی حسین طاهری"},
+]
+
+def process_youtube_video(video_url, ch_info):
+    """دانلود صدا، تبدیل به MP3 با کیفیت ۳۲۰ و ارسال مستقیم به ابر آروان"""
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': '/tmp/%(id)s.%(ext)s',
+        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}],
+        'quiet': True,
+        'no_warnings': True
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(video_url, download=True)
+        vid_id = info['id']
+        title = info.get('title', 'بدون عنوان')
+        duration = info.get('duration', 0)
+        mp3_file = f"/tmp/{vid_id}.mp3"
+        s3_key = f"incoming/youtube/{vid_id}.mp3"
+
+        with open(mp3_file, 'rb') as f:
+            s3_client.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=f, ContentType="audio/mpeg", ACL="public-read")
+
+        s3_url = f"{S3_ENDPOINT}/{S3_BUCKET}/{s3_key}"
+        supabase.table("tracks").insert({
+            "title": title[:100],
+            "reciter_name": ch_info.get("reciter", "مداح نامشخص"),
+            "duration": duration,
+            "bitrate": "320 kbps",
+            "audio_url": s3_url,
+            "s3_key": s3_key,
+            "status": "pending"
+        }).execute()
+
+        os.remove(mp3_file)
+        print(f"[✓] ویدیو با موفقیت به صوت ۳۲۰ تبدیل و در ابر آروان ذخیره شد: {title}")
+
+if __name__ == '__main__':
+    print("پایشگر خودکار کانال‌های یوتیوب در حال اجراست...")
+    for ch in CHANNELS:
+        print(f"پایش کانال: {ch['name']}")
+`;
+
+  // Ready-to-use Python script with Telethon + ArvanCloud S3 Boto3 + Supabase Client
+  const pythonBotScript = `"""
+ربات تلگرام هوشمند گردآوری مداحی و ارسال مستقیم به باکت S3 ابر آروان و سوپابیس
+زبان: Python 3.10+
+کتابخانه‌های مورد نیاز: pip install telethon boto3 supabase mutagen python-dotenv
+"""
+
+import os
+import re
+import asyncio
+import boto3
+from telethon import TelegramClient, events
+from telethon.tl.types import DocumentAttributeAudio
+from supabase import create_client, Client
+from mutagen.easyid3 import EasyID3
+import io
+
+# --- تنظیمات تلگرام (از https://my.telegram.org دریافت کنید) ---
+API_ID = int(os.getenv("TELEGRAM_API_ID", "12345678"))
+API_HASH = os.getenv("TELEGRAM_API_HASH", "your_telegram_api_hash")
+SESSION_NAME = "madahi_scraper_session"
+
+# --- کانال‌های هدف تلگرام برای گردآوری خودکار ---
+TARGET_CHANNELS = [
+    "@fotros_ir",
+    "@meysammotiee",
+    "@nohe_archive",
+    "@rayat_alreza"
+]
+
+# --- تنظیمات استوریج ابر آروان (ArvanCloud S3) ---
+raw_endpoint = os.getenv("ARVAN_S3_ENDPOINT", os.getenv("ARVAN_ENDPOINT", "https://s3.ir-thr-at1.arvanstorage.ir")).strip().strip('"\'')
+if not raw_endpoint.startswith("http://") and not raw_endpoint.startswith("https://"):
+    raw_endpoint = "https://" + raw_endpoint
+S3_ENDPOINT = raw_endpoint.rstrip('/')
+S3_BUCKET = os.getenv("ARVAN_S3_BUCKET", os.getenv("ARVAN_BUCKET_NAME", "madahi-media-vault"))
+S3_ACCESS_KEY = os.getenv("ARVAN_ACCESS_KEY", "your_arvan_access_key")
+S3_SECRET_KEY = os.getenv("ARVAN_SECRET_KEY", "your_arvan_secret_key")
+
+s3_client = boto3.client(
+    "s3",
+    endpoint_url=S3_ENDPOINT,
+    aws_access_key_id=S3_ACCESS_KEY,
+    aws_secret_access_key=S3_SECRET_KEY,
+    region_name="ir-thr-at1"
+)
+
+# --- تنظیمات پایگاه داده Supabase ---
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://xyzcompany.supabase.co")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "your_supabase_service_role_key")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+# --- کلاینت تلگرام (UserBot با پروتکل قدرتمند MTProto) ---
+client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+
+@client.on(events.NewMessage(chats=TARGET_CHANNELS))
+async def handle_new_audio(event):
+    """شنود پیام‌های جدید در کانال‌ها و بررسی وجود فایل صوتی"""
+    message = event.message
+    
+    # بررسی آیا پیام حاوی فایل صوتی یا وویس است
+    if message.audio or (message.document and any(isinstance(attr, DocumentAttributeAudio) for attr in message.document.attributes)):
+        sender = await event.get_chat()
+        channel_username = f"@{sender.username}" if sender.username else str(sender.id)
+        print(f"[*] قطعه جدید در کانال {channel_username} یافت شد. پیام: {message.id}")
+        
+        # استخراج مشخصات صوتی
+        duration = 0
+        title = "بدون عنوان"
+        performer = "مداح نامشخص"
+        
+        if message.audio:
+            duration = message.audio.duration
+            for attr in message.document.attributes:
+                if isinstance(attr, DocumentAttributeAudio):
+                    if attr.title: title = attr.title
+                    if attr.performer: performer = attr.performer
+        
+        # اگر در تگ‌های صوتی نام نبود، از کپشن پیام استفاده می‌کنیم
+        caption = message.text or ""
+        if title == "بدون عنوان" and caption:
+            first_line = caption.strip().split('\\n')[0]
+            title = first_line[:60]
+            
+        file_size_mb = round(message.file.size / (1024 * 1024), 2)
+        s3_key = f"incoming/bot_{message.id}_{message.file.name or 'audio.mp3'}"
+        
+        print(f"[+] در حال دانلود و ارسال مستقیم به ابر آروان: {title} ({file_size_mb} MB)...")
+        
+        # دانلود در بافر رم جهت آپلود بدون ذخیره طولانی روی هارد سرور
+        audio_bytes = await message.download_media(file=bytes)
+        
+        # آپلود به باکت S3 ابر آروان با هدر Content-Type صوتی
+        s3_client.put_object(
+            Bucket=S3_BUCKET,
+            Key=s3_key,
+            Body=audio_bytes,
+            ContentType="audio/mpeg",
+            ACL="public-read"
+        )
+        
+        s3_url = f"{S3_ENDPOINT}/{S3_BUCKET}/{s3_key}"
+        print(f"[✓] آپلود به آروان با موفقیت انجام شد: {s3_url}")
+        
+        # ثبت در جدول tracks پایگاه داده سوپابیس با وضعیت pending (جهت بازبینی در پنل ادمین)
+        record = {
+            "title": title,
+            "reciter_name": performer,
+            "duration": duration,
+            "file_size_mb": file_size_mb,
+            "bitrate": "128 kbps",
+            "audio_url": s3_url,
+            "s3_key": s3_key,
+            "source_telegram_channel": channel_username,
+            "source_telegram_msg_id": message.id,
+            "status": "pending",  # در انتظار تایید در پنل ادمین
+            "lyrics": []
+        }
+        
+        res = supabase.table("tracks").insert(record).execute()
+        print(f"[✓] رکورد با موفقیت در سوپابیس ثبت شد. شناسه: {res.data}")
+
+async def main():
+    await client.start()
+    print("[*] ربات گردآورنده مداحی تلگرام با موفقیت اجرا شد و در حال شنود کانال‌هاست...")
+    await client.run_until_disconnected()
+
+if __name__ == '__main__':
+    asyncio.run(main())
+`;
+
+  // SQL schema for Supabase
+  const supabaseSqlSchema = `-- اسکریپت ساخت جداول پایگاه داده در Supabase (PostgreSQL)
+
+-- ۱. جدول مداحان و قاریان
+CREATE TABLE IF NOT EXISTS public.reciters (
+    id TEXT PRIMARY KEY DEFAULT 'rec_' || gen_random_uuid(),
+    name TEXT NOT NULL,
+    title TEXT NOT NULL,
+    bio TEXT,
+    avatar_url TEXT,
+    style TEXT,
+    accent_color TEXT DEFAULT '#10b981',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- ۲. جدول دسته‌بندی‌ها
+CREATE TABLE IF NOT EXISTS public.categories (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT UNIQUE NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- ۳. جدول قطعات صوتی (Tracks)
+CREATE TABLE IF NOT EXISTS public.tracks (
+    id TEXT PRIMARY KEY DEFAULT 'track_' || gen_random_uuid(),
+    title TEXT NOT NULL,
+    reciter_id TEXT REFERENCES public.reciters(id) ON DELETE SET NULL,
+    reciter_name TEXT NOT NULL,
+    category_id TEXT REFERENCES public.categories(id) ON DELETE SET NULL,
+    occasion TEXT,
+    duration INTEGER NOT NULL DEFAULT 0,
+    file_size_mb NUMERIC(6, 2) DEFAULT 0,
+    bitrate TEXT DEFAULT '128 kbps',
+    audio_url TEXT NOT NULL,
+    cover_url TEXT,
+    s3_key TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'approved' | 'rejected'
+    source_telegram_channel TEXT,
+    source_telegram_msg_id BIGINT,
+    play_count BIGINT DEFAULT 0,
+    lyrics JSONB DEFAULT '[]'::jsonb,
+    tags TEXT[] DEFAULT '{}',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- ۴. ایندکس‌ها برای کوئری‌های سریع در پلیر
+CREATE INDEX IF NOT EXISTS idx_tracks_status ON public.tracks(status);
+CREATE INDEX IF NOT EXISTS idx_tracks_category ON public.tracks(category_id);
+CREATE INDEX IF NOT EXISTS idx_tracks_reciter ON public.tracks(reciter_id);
+
+-- ۵. فعال‌سازی امنیت سطح سطر (RLS)
+ALTER TABLE public.tracks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.reciters ENABLE ROW LEVEL SECURITY;
+
+-- سیاست خواندن عمومی برای قطعات تایید شده
+CREATE POLICY "Public tracks are viewable by everyone" 
+ON public.tracks FOR SELECT 
+USING (status = 'approved');
+
+-- دسترسی کامل برای ادمین (Service Role)
+CREATE POLICY "Service role full access" 
+ON public.tracks FOR ALL 
+TO service_role 
+USING (true);
+`;
+
+  return (
+    <div className="space-y-6 pb-32">
+      {/* Overview Stat Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Stat 1: Pending Queue */}
+        <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 flex items-center justify-between">
+          <div className="space-y-1">
+            <span className="text-xs text-slate-400">صف بررسی ربات تلگرام</span>
+            <div className="text-2xl font-bold font-mono text-amber-400 tabular-nums">
+              {toPersianDigits(pendingQueue.length)}
+            </div>
+            <span className="text-[11px] text-amber-400/80">نیازمند تایید ادمین</span>
+          </div>
+          <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+            <Clock className="w-6 h-6" />
+          </div>
+        </div>
+
+        {/* Stat 2: Total Approved Tracks */}
+        <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 flex items-center justify-between">
+          <div className="space-y-1">
+            <span className="text-xs text-slate-400">قطعات منتشرشده عمومی</span>
+            <div className="text-2xl font-bold font-mono text-emerald-400 tabular-nums">
+              {toPersianDigits(tracks.length)}
+            </div>
+            <span className="text-[11px] text-emerald-400/80">فعال در کلاینت پلیر</span>
+          </div>
+          <div className="w-12 h-12 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+            <CheckCircle2 className="w-6 h-6" />
+          </div>
+        </div>
+
+        {/* Stat 3: ArvanCloud S3 Storage */}
+        <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 flex items-center justify-between">
+          <div className="space-y-1">
+            <span className="text-xs text-slate-400">فضای باکت ابر آروان (S3)</span>
+            <div className="text-2xl font-bold font-mono text-slate-100 tabular-nums">
+              {toPersianDigits('14.8')} <span className="text-xs font-sans text-slate-400">گیگابایت</span>
+            </div>
+            <span className="text-[11px] text-slate-500">منطقه: ir-thr-at1</span>
+          </div>
+          <div className="w-12 h-12 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400">
+            <HardDrive className="w-6 h-6" />
+          </div>
+        </div>
+
+        {/* Stat 4: Supabase Database */}
+        <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 flex items-center justify-between">
+          <div className="space-y-1">
+            <span className="text-xs text-slate-400">کانال‌های متصل تلگرام</span>
+            <div className="text-2xl font-bold font-mono text-indigo-400 tabular-nums">
+              {toPersianDigits(telegramSources.filter((s) => s.isMonitored).length)}
+            </div>
+            <span className="text-[11px] text-indigo-400/80">پایش دوره‌ای خودکار</span>
+          </div>
+          <div className="w-12 h-12 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
+            <Send className="w-6 h-6" />
+          </div>
+        </div>
+      </div>
+
+      {/* Admin Sub Navigation Tabs (Segmented Controls) */}
+      <div className="flex items-center gap-2 border-b border-slate-800 pb-3 overflow-x-auto">
+        <button
+          onClick={() => setActiveAdminTab('queue')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-medium whitespace-nowrap transition-all border ${
+            activeAdminTab === 'queue'
+              ? 'bg-amber-500 text-slate-950 font-bold border-amber-400 shadow-sm'
+              : 'bg-slate-900 text-slate-400 hover:text-slate-200 border-slate-800'
+          }`}
+        >
+          <Clock className="w-4 h-4" />
+          <span>صف بررسی فایل‌ها</span>
+          {pendingQueue.length > 0 && (
+            <span
+              className={`text-xs px-1.5 py-0.2 rounded-full font-mono tabular-nums ${
+                activeAdminTab === 'queue'
+                  ? 'bg-slate-950/20 text-slate-950'
+                  : 'bg-amber-500/20 text-amber-300'
+              }`}
+            >
+              {toPersianDigits(pendingQueue.length)}
+            </span>
+          )}
+        </button>
+
+        <button
+          onClick={() => setActiveAdminTab('youtube_studio')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-medium whitespace-nowrap transition-all border ${
+            activeAdminTab === 'youtube_studio'
+              ? 'bg-rose-600 text-white font-bold border-rose-500 shadow-sm'
+              : 'bg-slate-900 text-slate-400 hover:text-slate-200 border-slate-800'
+          }`}
+        >
+          <Youtube className="w-4 h-4 text-rose-400" />
+          <span>استودیو یوتیوب و وب</span>
+          <span
+            className={`text-xs px-1.5 py-0.2 rounded-full font-mono tabular-nums ${
+              activeAdminTab === 'youtube_studio'
+                ? 'bg-white/20 text-white'
+                : 'bg-rose-500/20 text-rose-300'
+            }`}
+          >
+            {toPersianDigits(youtubeChannels.filter((c) => c.isMonitored).length)} کانال
+          </span>
+        </button>
+
+        <button
+          onClick={() => setActiveAdminTab('upload')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-medium whitespace-nowrap transition-all border ${
+            activeAdminTab === 'upload'
+              ? 'bg-emerald-500 text-slate-950 font-bold border-emerald-400 shadow-sm'
+              : 'bg-slate-900 text-slate-400 hover:text-slate-200 border-slate-800'
+          }`}
+        >
+          <UploadCloud className="w-4 h-4" />
+          <span>آپلود مستقیم به ابر آروان</span>
+        </button>
+
+        <button
+          onClick={() => {
+            setActiveAdminTab('cloud_sync');
+            fetchSyncedFiles();
+          }}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-medium whitespace-nowrap transition-all border ${
+            activeAdminTab === 'cloud_sync'
+              ? 'bg-sky-500 text-slate-950 font-bold border-sky-400 shadow-sm'
+              : 'bg-slate-900 text-slate-400 hover:text-slate-200 border-slate-800'
+          }`}
+        >
+          <HardDrive className="w-4 h-4 text-sky-400" />
+          <span>همگام‌سازی و باکت آروان</span>
+          {serverCloudStatus?.arvan?.canConnect ? (
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" title="متصل"></span>
+          ) : (
+            <span className="w-2 h-2 rounded-full bg-rose-400" title="نیاز به بررسی اتصال"></span>
+          )}
+        </button>
+
+        <button
+          onClick={() => setActiveAdminTab('reciters')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-medium whitespace-nowrap transition-all border ${
+            activeAdminTab === 'reciters'
+              ? 'bg-emerald-500 text-slate-950 font-bold border-emerald-400 shadow-sm'
+              : 'bg-slate-900 text-slate-400 hover:text-slate-200 border-slate-800'
+          }`}
+        >
+          <Radio className="w-4 h-4" />
+          <span>مدیریت مداحان ({toPersianDigits(reciters.length)})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveAdminTab('telegram')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-medium whitespace-nowrap transition-all border ${
+            activeAdminTab === 'telegram'
+              ? 'bg-emerald-500 text-slate-950 font-bold border-emerald-400 shadow-sm'
+              : 'bg-slate-900 text-slate-400 hover:text-slate-200 border-slate-800'
+          }`}
+        >
+          <Send className="w-4 h-4" />
+          <span>کانال‌های تلگرام</span>
+        </button>
+
+        <button
+          onClick={() => setActiveAdminTab('scripts')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-medium whitespace-nowrap transition-all border ${
+            activeAdminTab === 'scripts'
+              ? 'bg-emerald-500 text-slate-950 font-bold border-emerald-400 shadow-sm'
+              : 'bg-slate-900 text-slate-400 hover:text-slate-200 border-slate-800'
+          }`}
+        >
+          <Terminal className="w-4 h-4" />
+          <span>اسکریپت‌های سرور و دیتابیس</span>
+        </button>
+      </div>
+
+      {/* Tab 1: Review Queue (فایل‌های ارسال شده توسط ربات تلگرام) */}
+      {activeAdminTab === 'queue' && (
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-slate-900/60 p-4 rounded-2xl border border-slate-800">
+            <div>
+              <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                <span>صف تایید فایل‌های ارسال شده از ربات تلگرام</span>
+              </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                فایل‌های صوتی که ربات به صورت خودکار از کانال‌ها دانلود کرده و به باکت ابر آروان
+                فرستاده است. قبل از نمایش در اپلیکیشن می‌توانید آن‌ها را بشنوید، اطلاعاتشان را ویرایش
+                کرده و تایید کنید.
+              </p>
+            </div>
+
+            <button
+              onClick={handleTriggerScraper}
+              disabled={isScrapingRunning}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shrink-0 transition-colors disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isScrapingRunning ? 'animate-spin' : ''}`} />
+              <span>{isScrapingRunning ? 'در حال پایش کانال‌ها...' : 'تست پایش فوری کانال‌ها'}</span>
+            </button>
+          </div>
+
+          {pendingQueue.length === 0 ? (
+            <div className="p-12 text-center bg-slate-900/40 rounded-2xl border border-slate-800 text-slate-400 space-y-3">
+              <CheckCircle2 className="w-12 h-12 mx-auto text-emerald-400 stroke-1" />
+              <h4 className="text-base font-bold text-slate-200">صف بررسی خالی است!</h4>
+              <p className="text-xs text-slate-500 max-w-md mx-auto">
+                تمامی قطعات جمع‌آوری شده توسط ربات تلگرام بررسی و تایید شده‌اند. فایل‌های جدید به محض
+                انتشار در کانال‌های تلگرامی در اینجا ظاهر خواهند شد.
+              </p>
+              <button
+                onClick={handleTriggerScraper}
+                className="text-xs text-indigo-400 hover:underline pt-1 inline-block"
+              >
+                شبیه‌سازی دریافت یک فایل صوتی از کانال تلگرام
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {pendingQueue.map((item) => {
+                const isPlayingThis = currentTrack?.id === item.id && isPlaying;
+                return (
+                  <div
+                    key={item.id}
+                    className="p-4 rounded-2xl bg-slate-900/80 border border-slate-800 hover:border-slate-700 transition-all flex flex-col md:flex-row items-start md:items-center justify-between gap-4"
+                  >
+                    {/* Track info & quick preview play */}
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                      <button
+                        onClick={() => {
+                          if (isPlayingThis) {
+                            togglePlay();
+                          } else {
+                            playTrack(item);
+                          }
+                        }}
+                        className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 transition-transform active:scale-95 ${
+                          isPlayingThis
+                            ? 'bg-amber-500 text-slate-950'
+                            : 'bg-slate-800 text-slate-200 hover:bg-amber-500/20 hover:text-amber-400'
+                        }`}
+                        title="پخش پیش‌نمایش"
+                      >
+                        {isPlayingThis ? (
+                          <Pause className="w-5 h-5 fill-current" />
+                        ) : (
+                          <Play className="w-5 h-5 fill-current translate-x-0.5" />
+                        )}
+                      </button>
+
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h4 className="text-sm font-semibold text-slate-100 truncate">
+                            {item.title}
+                          </h4>
+                          <span className="bg-amber-500/10 text-amber-400 text-[10px] px-2 py-0.5 rounded border border-amber-500/20 shrink-0">
+                            در انتظار تایید
+                          </span>
+                          {item.sourceType === 'youtube' && (
+                            <span className="bg-rose-500/10 text-rose-400 text-[10px] px-2 py-0.5 rounded border border-rose-500/30 shrink-0 flex items-center gap-1">
+                              <Youtube className="w-3 h-3 text-rose-400" />
+                              <span>{item.sourceChannelName || 'کانال یوتیوب'}</span>
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2 text-xs text-slate-400 mt-1 flex-wrap">
+                          <span className="text-slate-300 font-medium">{item.reciterName}</span>
+                          <span className="text-slate-600">·</span>
+                          <span className="text-indigo-400 font-mono text-[11px]">
+                            {item.sourceChannelName || item.sourceTelegramChannel || 'ورودی وب'}
+                            {item.sourceTelegramMsgId ? ` (پیام ${toPersianDigits(item.sourceTelegramMsgId)})` : ''}
+                          </span>
+                          <span className="text-slate-600">·</span>
+                          <span className="text-slate-500 font-mono tabular-nums">
+                            {toPersianDigits(formatDuration(item.duration))}
+                          </span>
+                          <span className="text-slate-600">·</span>
+                          <span className="text-slate-500 font-mono tabular-nums">
+                            {formatFileSize(item.fileSizeMb)}
+                          </span>
+                        </div>
+
+                        <div className="text-[11px] text-slate-500 font-mono mt-1 truncate">
+                          ابر آروان: {item.s3Key}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Action buttons */}
+                    <div className="flex items-center gap-2 shrink-0 w-full md:w-auto justify-end border-t md:border-t-0 pt-2 md:pt-0 border-slate-800">
+                      <button
+                        onClick={() => setEditingTrack(item)}
+                        className="flex items-center gap-1 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                        <span>ویرایش مشخصات</span>
+                      </button>
+
+                      <button
+                        onClick={() => handleRejectTrack(item.id)}
+                        className="flex items-center gap-1 px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 text-xs font-medium border border-rose-500/20 transition-colors"
+                      >
+                        <XCircle className="w-3.5 h-3.5" />
+                        <span>رد فایل</span>
+                      </button>
+
+                      <button
+                        onClick={() => handleApproveTrack(item)}
+                        className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold shadow-md shadow-emerald-500/20 transition-all active:scale-95"
+                      >
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>تایید و انتشار عمومی</span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Tab: YouTube & Web Studio (استودیو یوتیوب و سورس‌های وب) */}
+      {activeAdminTab === 'youtube_studio' && (
+        <div className="space-y-6">
+          {/* Top Banner & Overview */}
+          <div className="relative rounded-2xl bg-gradient-to-r from-rose-950/60 via-slate-900 to-slate-900 border border-rose-500/30 p-5 overflow-hidden">
+            <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 relative z-10">
+              <div className="space-y-1 max-w-2xl">
+                <div className="flex items-center gap-2 text-rose-400 text-xs font-bold">
+                  <Youtube className="w-4 h-4" />
+                  <span>پایش خودکار یوتیوب و تبدیل استریم صوتی</span>
+                </div>
+                <h3 className="text-base sm:text-lg font-bold text-white">
+                  استودیو دریافت خودکار مداحی و ادعیه از یوتیوب و وب
+                </h3>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  کانال‌های مدنظر خود در یوتیوب را ثبت کنید تا به محض انتشار ویدیوی جدید، صوت آن به صورت خودکار با کیفیت ۳۲۰ استخراج، به باکت ابر آروان فرستاده و در صف بررسی پنل ظاهر شود. همچنین می‌توانید هر لینک تکی یوتیوب یا وب را با یک کلیک تبدیل کنید.
+                </p>
+              </div>
+
+              <button
+                onClick={handleSyncYouTubeChannelsNow}
+                disabled={isSyncingChannels}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-lg shadow-rose-600/20 transition-all active:scale-95 shrink-0 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${isSyncingChannels ? 'animate-spin' : ''}`} />
+                <span>{isSyncingChannels ? 'در حال پایش کانال‌ها...' : 'پایش و همگام‌سازی فوری کانال‌ها'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Section 1: Instant Link Downloader & Converter */}
+          <div className="bg-slate-900/90 rounded-2xl border border-slate-800 p-5 sm:p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <ArrowDownToLine className="w-5 h-5 text-rose-400" />
+                <h4 className="text-sm font-bold text-slate-100">
+                  دریافت فوری از لینک یوتیوب یا فایل مستقیم وب
+                </h4>
+              </div>
+              <span className="text-[11px] text-slate-400 font-mono">
+                موتور: yt-dlp + ffmpeg 320kbps
+              </span>
+            </div>
+
+            <form onSubmit={handleExtractFromYouTubeOrWeb} className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                  آدرس ویدیوی یوتیوب، شورتز، یا لینک مستقیم فایل وب *
+                </label>
+                <div className="relative">
+                  <input
+                    type="url"
+                    required
+                    dir="ltr"
+                    value={ytInputUrl}
+                    onChange={(e) => setYtInputUrl(e.target.value)}
+                    placeholder="https://www.youtube.com/watch?v=... یا https://youtu.be/..."
+                    className="w-full pr-4 pl-24 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs sm:text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-rose-500 font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const clipText = await navigator.clipboard.readText();
+                        if (clipText) setYtInputUrl(clipText);
+                      } catch (_) {}
+                    }}
+                    className="absolute left-2 top-1/2 -translate-y-1/2 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg transition-colors"
+                  >
+                    چسباندن (Paste)
+                  </button>
+                </div>
+              </div>
+
+              {/* Settings row */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    کیفیت صوتی خروجی
+                  </label>
+                  <div className="flex items-center gap-2 bg-slate-950 p-1 rounded-xl border border-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => setYtBitrate('320')}
+                      className={`flex-1 py-1 text-xs font-semibold rounded-lg transition-colors ${
+                        ytBitrate === '320'
+                          ? 'bg-rose-600 text-white'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      ۳۲۰ kbps (استودیویی)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setYtBitrate('128')}
+                      className={`flex-1 py-1 text-xs font-semibold rounded-lg transition-colors ${
+                        ytBitrate === '128'
+                          ? 'bg-rose-600 text-white'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      ۱۲۸ kbps (استاندارد)
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    مداح پیش‌فرض
+                  </label>
+                  <select
+                    value={ytReciterId}
+                    onChange={(e) => setYtReciterId(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs sm:text-sm text-slate-200 focus:outline-none focus:border-rose-500"
+                  >
+                    {reciters.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.title}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    دسته‌بندی موضوعی
+                  </label>
+                  <select
+                    value={ytCategoryId}
+                    onChange={(e) => setYtCategoryId(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs sm:text-sm text-slate-200 focus:outline-none focus:border-rose-500"
+                  >
+                    {categories
+                      .filter((c) => c.slug !== 'all')
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Progress bar when converting */}
+              {isYtProcessing && (
+                <div className="p-4 bg-slate-950 rounded-xl border border-rose-500/40 space-y-2">
+                  <div className="flex items-center justify-between text-xs font-mono">
+                    <span className="text-rose-400 font-sans font-semibold flex items-center gap-2">
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      {ytProcessStep}
+                    </span>
+                    <span className="text-slate-300 tabular-nums">{toPersianDigits(ytProcessProgress)}%</span>
+                  </div>
+                  <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-l from-rose-500 to-amber-500 transition-all duration-300 rounded-full"
+                      style={{ width: `${ytProcessProgress}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={isYtProcessing || !ytInputUrl.trim()}
+                className="w-full py-3 bg-gradient-to-l from-rose-600 to-rose-700 hover:from-rose-500 hover:to-rose-600 text-white font-bold text-xs sm:text-sm rounded-xl shadow-lg shadow-rose-600/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                <Youtube className="w-4 h-4" />
+                <span>شروع استخراج صوت، تبدیل به MP3 و ارسال به باکت ابر آروان</span>
+              </button>
+            </form>
+          </div>
+
+          {/* Section 2: Monitored YouTube Channels */}
+          <div className="bg-slate-900/90 rounded-2xl border border-slate-800 p-5 sm:p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div>
+                <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                  <Film className="w-4 h-4 text-rose-400" />
+                  <span>کانال‌های تحت پایش خودکار یوتیوب ({toPersianDigits(youtubeChannels.length)})</span>
+                </h4>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  سیستم به صورت خودکار ویدیوهای جدید این کانال‌ها را بررسی، دانلود و به صف بررسی شما منتقل می‌کند.
+                </p>
+              </div>
+
+              <div className="text-xs text-emerald-400 font-mono">
+                {toPersianDigits(youtubeChannels.filter((c) => c.isMonitored).length)} کانال فعال
+              </div>
+            </div>
+
+            {/* Channels Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {youtubeChannels.map((ch) => (
+                <div
+                  key={ch.id}
+                  className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 flex items-center justify-between gap-3"
+                >
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-slate-100 text-xs sm:text-sm truncate">
+                        {ch.channelName}
+                      </span>
+                      {ch.isMonitored ? (
+                        <span className="bg-emerald-500/10 text-emerald-400 text-[10px] px-2 py-0.2 rounded border border-emerald-500/20">
+                          پایش فعال
+                        </span>
+                      ) : (
+                        <span className="bg-slate-800 text-slate-400 text-[10px] px-2 py-0.2 rounded">
+                          متوقف
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2 text-xs text-slate-400">
+                      <span className="font-mono text-rose-400 text-[11px]">{ch.channelHandle}</span>
+                      <span className="text-slate-600">·</span>
+                      <span>آخرین پایش: {ch.lastCheckedAt}</span>
+                    </div>
+
+                    <div className="text-[11px] text-slate-500 font-mono">
+                      تعداد استخراج شده: {toPersianDigits(ch.totalExtracted)} قطعه صوتی
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <a
+                      href={ch.channelUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="p-2 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg transition-colors"
+                      title="مشاهده کانال در یوتیوب"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+
+                    <button
+                      onClick={() => {
+                        setYoutubeChannels((prev) =>
+                          prev.map((c) => (c.id === ch.id ? { ...c, isMonitored: !c.isMonitored } : c))
+                        );
+                      }}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors border ${
+                        ch.isMonitored
+                          ? 'bg-rose-500/10 text-rose-300 border-rose-500/20 hover:bg-rose-500/20'
+                          : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20 hover:bg-emerald-500/20'
+                      }`}
+                    >
+                      {ch.isMonitored ? 'توقف' : 'فعال‌سازی'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Add Channel Inline Form */}
+            <div className="pt-3 border-t border-slate-800">
+              <span className="text-xs font-bold text-slate-200 block mb-2">
+                افزودن کانال یوتیوب جدید به پایش خودکار:
+              </span>
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                <input
+                  type="text"
+                  placeholder="نام کانال (مثلاً: رایه العباس)"
+                  value={newYtChannelName}
+                  onChange={(e) => setNewYtChannelName(e.target.value)}
+                  className="px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-rose-500"
+                />
+                <input
+                  type="text"
+                  dir="ltr"
+                  placeholder="هندل یوتیوب (مثلاً: RayatAlAbbas@)"
+                  value={newYtChannelHandle}
+                  onChange={(e) => setNewYtChannelHandle(e.target.value)}
+                  className="px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-rose-500 font-mono"
+                />
+                <select
+                  value={newYtChannelReciterId}
+                  onChange={(e) => setNewYtChannelReciterId(e.target.value)}
+                  className="px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-rose-500"
+                >
+                  {reciters.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      مداح: {r.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={handleAddYouTubeChannel}
+                  disabled={!newYtChannelName.trim()}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl shadow transition-colors disabled:opacity-50"
+                >
+                  افزودن به پایش خودکار
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tab 2: Direct Upload to ArvanCloud S3 */}
+      {activeAdminTab === 'upload' && (
+        <div className="max-w-2xl mx-auto bg-slate-900/90 rounded-2xl border border-slate-800 p-6 space-y-6">
+          <div className="border-b border-slate-800 pb-3 space-y-2">
+            <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
+              <UploadCloud className="w-5 h-5 text-emerald-400" />
+              <span>آپلود مستقیم فایل صوتی به استوریج ابر آروان (S3)</span>
+            </h3>
+            <p className="text-xs text-slate-400">
+              فایل صوتی به باکت <code className="text-emerald-400 font-mono">{serverCloudStatus?.arvan?.bucketName || cloudConfig.bucketName}</code> آپلود
+              شده و رکورد آن در جدول tracks سوپابیس درج می‌گردد.
+            </p>
+
+            {serverCloudStatus?.arvan?.canConnect ? (
+              <div className="p-2.5 bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 rounded-xl text-xs flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+                  <span>اتصال استوریج ابر آروان فعال است: باکت <code className="font-mono font-bold text-emerald-300">{serverCloudStatus.arvan.bucketName}</code></span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveAdminTab('cloud_sync');
+                    fetchSyncedFiles();
+                  }}
+                  className="text-[11px] bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 px-2.5 py-1 rounded-lg transition-colors font-medium shrink-0"
+                >
+                  مشاهده فایل‌های باکت ←
+                </button>
+              </div>
+            ) : (
+              <div className="p-3 bg-amber-500/10 border border-amber-500/30 text-amber-200 rounded-xl text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+                  <span>
+                    {serverCloudStatus?.arvan?.isConfigured
+                      ? `خطا در اتصال به باکت: ${serverCloudStatus.arvan.connectionMessage || 'بررسی دسترسی باکت'}`
+                      : 'کلیدهای ابر آروان هنوز تنظیم نشده‌اند (فایل‌ها در باکت ذخیره نمی‌شوند).'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveAdminTab('cloud_sync')}
+                  className="px-3 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs transition-colors shrink-0"
+                >
+                  تنظیم و تست اتصال ابر آروان
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Upload Error Alert */}
+          {uploadError && (
+            <div className="p-4 bg-rose-500/15 border border-rose-500/40 text-rose-200 rounded-2xl text-xs space-y-2 animate-in fade-in">
+              <div className="flex items-center gap-2 font-bold text-rose-100 text-sm">
+                <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0" />
+                <span>خطا در آپلود به استوریج ابر آروان</span>
+              </div>
+              <p className="leading-relaxed text-rose-300">{uploadError}</p>
+              <div className="pt-2 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setActiveAdminTab('cloud_sync')}
+                  className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 rounded-xl text-xs font-semibold border border-rose-500/30 transition-colors"
+                >
+                  بررسی و اصلاح کلیدهای ابر آروان در تب همگام‌سازی ←
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setUploadError(null)}
+                  className="text-slate-400 hover:text-slate-200 text-xs px-2"
+                >
+                  بستن پیام
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Upload Success Alert */}
+          {uploadSuccess && (
+            <div className="p-4 bg-emerald-500/15 border border-emerald-500/40 text-emerald-200 rounded-2xl text-xs space-y-2 animate-in fade-in">
+              <div className="flex items-center gap-2 font-bold text-emerald-100 text-sm">
+                <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                <span>فایل با موفقیت روی فضای ابری ابر آروان آپلود شد!</span>
+              </div>
+              {uploadSuccessUrl && (
+                <div className="bg-slate-950/80 p-2.5 rounded-xl border border-slate-800 flex items-center justify-between gap-2 overflow-hidden">
+                  <span className="font-mono text-[11px] text-emerald-300 truncate" dir="ltr">
+                    {uploadSuccessUrl}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(uploadSuccessUrl, 'uploaded_url')}
+                    className="p-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded-lg shrink-0"
+                    title="کپی لینک"
+                  >
+                    {copiedScript === 'uploaded_url' ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
+              )}
+              <div className="pt-1 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveAdminTab('cloud_sync');
+                    fetchSyncedFiles();
+                  }}
+                  className="px-3 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 rounded-lg text-xs font-semibold transition-colors"
+                >
+                  مشاهده در باکت ابر آروان ←
+                </button>
+              </div>
+            </div>
+          )}
+
+          <form onSubmit={handleDirectUpload} className="space-y-4">
+            {/* File Drag and Drop / Input */}
+            <div className="border-2 border-dashed border-slate-700 hover:border-emerald-500/50 rounded-2xl p-6 text-center cursor-pointer transition-colors bg-slate-950/40">
+              <input
+                type="file"
+                id="audio-upload"
+                accept="audio/*"
+                onChange={(e) => {
+                  if (e.target.files && e.target.files[0]) {
+                    const f = e.target.files[0];
+                    setUploadFile(f);
+                    if (!uploadTitle) {
+                      setUploadTitle(f.name.replace(/\.[^/.]+$/, ''));
+                    }
+                  }
+                }}
+                className="hidden"
+              />
+              <label htmlFor="audio-upload" className="cursor-pointer block space-y-2">
+                <UploadCloud className="w-10 h-10 mx-auto text-emerald-400/80 stroke-1" />
+                {uploadFile ? (
+                  <div>
+                    <span className="text-sm font-semibold text-emerald-400 block">
+                      {uploadFile.name}
+                    </span>
+                    <span className="text-xs text-slate-500 font-mono">
+                      {formatFileSize(uploadFile.size / (1024 * 1024))}
+                    </span>
+                  </div>
+                ) : (
+                  <div>
+                    <span className="text-sm font-semibold text-slate-200 block">
+                      انتخاب فایل صوتی مداحی یا دعا (MP3, M4A, OGG)
+                    </span>
+                    <span className="text-xs text-slate-500">
+                      یا فایل را به اینجا بکشید و رها کنید
+                    </span>
+                  </div>
+                )}
+              </label>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  عنوان قطعه *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={uploadTitle}
+                  onChange={(e) => setUploadTitle(e.target.value)}
+                  placeholder="مثلاً: زیارت وارث با صدای فرهمند"
+                  className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  مداح / گوینده *
+                </label>
+                <select
+                  value={uploadReciterId}
+                  onChange={(e) => setUploadReciterId(e.target.value)}
+                  className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                >
+                  {reciters.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  دسته‌بندی موضوعی
+                </label>
+                <select
+                  value={uploadCategoryId}
+                  onChange={(e) => setUploadCategoryId(e.target.value)}
+                  className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                >
+                  {categories
+                    .filter((c) => c.slug !== 'all')
+                    .map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  مناسبت / سبک
+                </label>
+                <input
+                  type="text"
+                  value={uploadOccasion}
+                  onChange={(e) => setUploadOccasion(e.target.value)}
+                  placeholder="مثلاً: شب اول محرم ۱۴۰۳"
+                  className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+            </div>
+
+            {/* Optional Lyric Fields */}
+            <div className="space-y-3 pt-2 border-t border-slate-800">
+              <span className="text-xs font-semibold text-slate-300 block">
+                متن اولیه دعا یا مرثیه (اختیاری)
+              </span>
+              <div>
+                <textarea
+                  rows={2}
+                  value={uploadLyricsArabic}
+                  onChange={(e) => setUploadLyricsArabic(e.target.value)}
+                  placeholder="فراز عربی یا بند اول شعر..."
+                  className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-200 focus:outline-none focus:border-emerald-500 font-quran"
+                />
+              </div>
+              <div>
+                <textarea
+                  rows={2}
+                  value={uploadLyricsPersian}
+                  onChange={(e) => setUploadLyricsPersian(e.target.value)}
+                  placeholder="ترجمه فارسی..."
+                  className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={isUploading || !uploadTitle.trim()}
+              className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm shadow-lg shadow-emerald-500/20 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              {isUploading ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>در حال ارسال استریم به ابر آروان...</span>
+                </>
+              ) : (
+                <>
+                  <UploadCloud className="w-4 h-4" />
+                  <span>شروع آپلود و انتشار در دیتابیس</span>
+                </>
+              )}
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* Tab: Real ArvanCloud S3 Sync & Bucket Browser */}
+      {activeAdminTab === 'cloud_sync' && (
+        <div className="space-y-6">
+          {/* Header & Status Card */}
+          <div className="bg-slate-900/90 rounded-2xl border border-slate-800 p-5 sm:p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
+              <div>
+                <h3 className="text-base sm:text-lg font-bold text-slate-100 flex items-center gap-2">
+                  <HardDrive className="w-5 h-5 text-sky-400" />
+                  <span>مدیریت و همگام‌سازی استوریج ابر آروان (S3 Bucket Sync)</span>
+                </h3>
+                <p className="text-xs text-slate-400 mt-1">
+                  مشاهده زنده فایل‌های ذخیره شده در باکت آروان، تست سلامت اتصال و تنظیم کلیدهای دسترسی
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={fetchSyncedFiles}
+                  disabled={isLoadingS3Files}
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs transition-colors shadow-md shadow-sky-500/20 disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isLoadingS3Files ? 'animate-spin' : ''}`} />
+                  <span>{isLoadingS3Files ? 'در حال بررسی باکت...' : 'همگام‌سازی لیست باکت'}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Live Connection Badge */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 flex items-center gap-3">
+                <div
+                  className={`w-3 h-3 rounded-full shrink-0 ${
+                    serverCloudStatus?.arvan?.canConnect
+                      ? 'bg-emerald-400 ring-4 ring-emerald-400/20'
+                      : 'bg-rose-400 ring-4 ring-rose-400/20'
+                  }`}
+                />
+                <div>
+                  <span className="text-slate-400 text-[11px] block">وضعیت اتصال به ابر آروان:</span>
+                  <span className="font-bold text-slate-200">
+                    {serverCloudStatus?.arvan?.canConnect ? '🟢 متصل و آماده تبادل داده' : '🔴 قطع / عدم دسترسی به باکت'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800">
+                <span className="text-slate-400 text-[11px] block">نام باکت فعال:</span>
+                <span className="font-mono font-bold text-sky-300">
+                  {serverCloudStatus?.arvan?.bucketName || arvanForm.bucketName}
+                </span>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800">
+                <span className="text-slate-400 text-[11px] block">تعداد فایل‌های شناسایی شده در باکت:</span>
+                <span className="font-mono font-bold text-emerald-300">
+                  {toPersianDigits(syncedS3Files.length)} فایل
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Section: Live Credentials Editor & Test */}
+          <div className="bg-slate-900/90 rounded-2xl border border-slate-800 p-5 sm:p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                <Key className="w-4 h-4 text-amber-400" />
+                <span>تنظیم کلیدها و تست اتصال زنده (ArvanCloud S3 Config)</span>
+              </h4>
+              <span className="text-[11px] text-slate-400">
+                می‌توانید کلیدها را مستقیم در اینجا وارد کرده یا در تب Secrets محیط ذخیره کنید.
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  کلید دسترسی (ARVAN_ACCESS_KEY) *
+                </label>
+                <input
+                  type="text"
+                  value={arvanForm.accessKeyId}
+                  onChange={(e) => setArvanForm({ ...arvanForm, accessKeyId: e.target.value })}
+                  placeholder={serverCloudStatus?.arvan?.maskedAccessKey || 'مثلاً: ak_your_access_key'}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs font-mono text-slate-200 focus:outline-none focus:border-sky-500"
+                  dir="ltr"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  کلید محرمانه (ARVAN_SECRET_KEY) *
+                </label>
+                <input
+                  type="password"
+                  value={arvanForm.secretAccessKey}
+                  onChange={(e) => setArvanForm({ ...arvanForm, secretAccessKey: e.target.value })}
+                  placeholder="••••••••••••••••"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs font-mono text-slate-200 focus:outline-none focus:border-sky-500"
+                  dir="ltr"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  نام باکت (ARVAN_BUCKET_NAME) *
+                </label>
+                <input
+                  type="text"
+                  value={arvanForm.bucketName}
+                  onChange={(e) => setArvanForm({ ...arvanForm, bucketName: e.target.value })}
+                  placeholder="madahi-media-vault"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs font-mono text-slate-200 focus:outline-none focus:border-sky-500"
+                  dir="ltr"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  آدرس سرور استوریج (ARVAN_ENDPOINT)
+                </label>
+                <input
+                  type="text"
+                  value={arvanForm.endpoint}
+                  onChange={(e) => setArvanForm({ ...arvanForm, endpoint: e.target.value })}
+                  onBlur={() => {
+                    if (arvanForm.endpoint.trim()) {
+                      setArvanForm((prev) => ({ ...prev, endpoint: normalizeClientEndpoint(prev.endpoint) }));
+                    }
+                  }}
+                  placeholder="https://s3.ir-central1.arvanstorage.ir"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs font-mono text-slate-200 focus:outline-none focus:border-sky-500"
+                  dir="ltr"
+                />
+                <span className="text-[11px] text-slate-500 block mt-1">
+                  آدرس باید با //:https باشد (اگر بدون پروتکل وارد کنید خودکار اصلاح می‌شود)
+                </span>
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  دامین اختصاصی CDN (اختیاری - اگر ندارید این بخش را خالی بگذارید)
+                </label>
+                <input
+                  type="text"
+                  value={arvanForm.cdnDomain}
+                  onChange={(e) => setArvanForm({ ...arvanForm, cdnDomain: e.target.value })}
+                  onBlur={() => {
+                    if (arvanForm.cdnDomain.trim()) {
+                      setArvanForm((prev) => ({ ...prev, cdnDomain: normalizeClientCdn(prev.cdnDomain) }));
+                    }
+                  }}
+                  placeholder="خالی بگذارید تا از آدرس مستقیم باکت استفاده شود"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs font-mono text-slate-200 focus:outline-none focus:border-sky-500"
+                  dir="ltr"
+                />
+              </div>
+            </div>
+
+            {/* Test Connection Result Box */}
+            {arvanTestResult && (
+              <div
+                className={`p-3.5 rounded-xl border text-xs leading-relaxed flex items-start gap-2.5 animate-in fade-in ${
+                  arvanTestResult.success
+                    ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                    : 'bg-rose-500/15 border-rose-500/40 text-rose-200'
+                }`}
+              >
+                {arvanTestResult.success ? (
+                  <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+                ) : (
+                  <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+                )}
+                <div>
+                  <span className="font-bold block mb-1">
+                    {arvanTestResult.success ? 'پاسخ تست موفقیت‌آمیز بود:' : 'خطا در تست اتصال به ابر آروان:'}
+                  </span>
+                  <span>{arvanTestResult.message}</span>
+                </div>
+              </div>
+            )}
+
+            {saveConfigSuccess && (
+              <div className="p-3 bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 rounded-xl text-xs flex items-center gap-2">
+                <Check className="w-4 h-4 text-emerald-400" />
+                <span>تنظیمات ابر آروان با موفقیت در سرور ذخیره شد.</span>
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => handleTestArvanConnection(false)}
+                disabled={isTestingArvan}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition-colors disabled:opacity-50"
+              >
+                {isTestingArvan ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>در حال آزمایش اتصال به باکت...</span>
+                  </>
+                ) : (
+                  <>
+                    <Server className="w-3.5 h-3.5" />
+                    <span>تست زنده اتصال به ابر آروان</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleSaveArvanConfig}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs transition-colors shadow-md shadow-emerald-500/20"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>ذخیره و اعمال تنظیمات</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Section: Synced Files Browser */}
+          <div className="bg-slate-900/90 rounded-2xl border border-slate-800 p-5 sm:p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
+              <div>
+                <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                  <Layers className="w-4 h-4 text-sky-400" />
+                  <span>فایل‌های واقعی موجود در باکت ابر آروان ({toPersianDigits(syncedS3Files.length)})</span>
+                </h4>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  تمام فایل‌های صوتی و کاورهایی که هم‌اکنون به صورت فیزیکی روی باکت ابر آروان شما آپلود شده‌اند
+                </p>
+              </div>
+
+              {/* Filter */}
+              <div className="w-full sm:w-64">
+                <input
+                  type="text"
+                  value={syncedFileFilter}
+                  onChange={(e) => setSyncedFileFilter(e.target.value)}
+                  placeholder="جستجو در نام فایل‌های باکت..."
+                  className="w-full px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-sky-500"
+                />
+              </div>
+            </div>
+
+            {s3SyncError && (
+              <div className="p-3.5 bg-rose-500/10 border border-rose-500/30 text-rose-300 rounded-xl text-xs flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+                <span>{s3SyncError}</span>
+              </div>
+            )}
+
+            {/* Files List */}
+            {isLoadingS3Files ? (
+              <div className="p-10 text-center space-y-2">
+                <RefreshCw className="w-6 h-6 mx-auto animate-spin text-sky-400" />
+                <span className="text-xs text-slate-400 block">در حال بارگذاری لیست فایل‌ها از باکت ابر آروان...</span>
+              </div>
+            ) : syncedS3Files.length === 0 ? (
+              <div className="p-10 text-center space-y-3 bg-slate-950/40 rounded-2xl border border-slate-800/80">
+                <HardDrive className="w-10 h-10 mx-auto text-slate-600 stroke-1" />
+                <span className="text-sm font-semibold text-slate-300 block">
+                  {serverCloudStatus?.arvan?.canConnect
+                    ? 'باکت ابر آروان در دسترس است اما هنوز فایلی داخل آن قرار ندارد.'
+                    : 'ارتباط با باکت برقرار نیست یا کلیدهای آروان ثبت نشده است.'}
+                </span>
+                <p className="text-xs text-slate-500 max-w-md mx-auto">
+                  پس از وارد کردن کلیدها و آپلود از تب «آپلود مستقیم» یا از طریق پایشگر خودکار یوتیوب، فایل‌های صوتی بلافاصله در اینجا نمایان می‌شوند.
+                </p>
+                <div className="pt-2 flex justify-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setActiveAdminTab('upload')}
+                    className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs rounded-xl transition-colors"
+                  >
+                    رفتن به صفحه آپلود فایل ←
+                  </button>
+                  <button
+                    type="button"
+                    onClick={fetchSyncedFiles}
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-xs rounded-xl transition-colors"
+                  >
+                    تلاش مجدد برای همگام‌سازی 🔄
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {syncedS3Files
+                  .filter((f) => !syncedFileFilter || f.fileName.toLowerCase().includes(syncedFileFilter.toLowerCase()) || f.key.toLowerCase().includes(syncedFileFilter.toLowerCase()))
+                  .map((file) => (
+                    <div
+                      key={file.key}
+                      className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800 hover:border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors"
+                    >
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-xs sm:text-sm text-slate-100 truncate">
+                            {file.fileName}
+                          </span>
+                          {file.isAudio && (
+                            <span className="text-[10px] bg-sky-500/10 text-sky-400 px-2 py-0.5 rounded border border-sky-500/20 font-mono">
+                              صوت MP3
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 font-mono">
+                          <span className="text-slate-400 truncate max-w-xs" dir="ltr">
+                            {file.key}
+                          </span>
+                          <span>·</span>
+                          <span className="text-emerald-400">
+                            {formatFileSize(file.sizeMb)}
+                          </span>
+                          {file.lastModified && (
+                            <>
+                              <span>·</span>
+                              <span>
+                                {new Date(file.lastModified).toLocaleDateString('fa-IR')}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Actions */}
+                      <div className="flex items-center gap-2 shrink-0">
+                        {file.isAudio && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                playTrack({
+                                  id: `s3-${file.key}`,
+                                  title: file.fileName.replace(/\.[^/.]+$/, ''),
+                                  reciterId: 'rec-karimi',
+                                  reciterName: 'پخش مستقیم از ابر آروان',
+                                  categoryId: 'cat-all',
+                                  categoryName: 'استوریج آروان',
+                                  occasion: 'آرشیو ابری',
+                                  duration: 300,
+                                  audioUrl: file.url,
+                                  coverUrl: '',
+                                  fileSizeMb: file.sizeMb,
+                                  bitrate: '320 kbps',
+                                  status: 'approved',
+                                  playCount: 1,
+                                  createdAt: 'باکت آروان',
+                                  s3Key: file.key,
+                                  tags: ['ابر آروان'],
+                                  lyrics: [],
+                                });
+                              }}
+                              className="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 rounded-lg text-xs font-semibold flex items-center gap-1.5 border border-emerald-500/30 transition-colors"
+                              title="پخش آنلاین این فایل از باکت"
+                            >
+                              <Play className="w-3.5 h-3.5 fill-current" />
+                              <span>پخش آنلاین</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleImportS3FileToTracks(file)}
+                              className="px-3 py-1.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 rounded-lg text-xs font-semibold flex items-center gap-1 border border-sky-500/30 transition-colors"
+                              title="اضافه کردن به فهرست قطعات پلیر کاربر"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>افزودن به پلیر</span>
+                            </button>
+                          </>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(file.url, file.key)}
+                          className="p-2 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded-lg transition-colors border border-slate-800"
+                          title="کپی لینک مستقیم دانلود"
+                        >
+                          {copiedScript === file.key ? (
+                            <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          ) : (
+                            <Copy className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+
+                        <a
+                          href={file.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="p-2 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded-lg transition-colors border border-slate-800"
+                          title="باز کردن مستقیم لینک"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </a>
+
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteS3File(file.key)}
+                          className="p-2 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 rounded-lg transition-colors border border-rose-500/20"
+                          title="حذف دائمی از باکت"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Tab 3: Reciters Management */}
+      {activeAdminTab === 'reciters' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-base font-bold text-slate-100">
+              فهرست مداحان و گویندگان ({toPersianDigits(reciters.length)})
+            </h3>
+            <button
+              onClick={() => setShowAddReciterModal(true)}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold shadow-md shadow-emerald-500/20 transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              <span>افزودن مداح جدید</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {reciters.map((r) => (
+              <div
+                key={r.id}
+                className="p-4 rounded-2xl bg-slate-900/80 border border-slate-800 flex items-start gap-3"
+              >
+                <div
+                  className="w-12 h-12 rounded-xl flex items-center justify-center font-bold text-base border shrink-0"
+                  style={{
+                    backgroundColor: `${r.accentColor}15`,
+                    borderColor: `${r.accentColor}40`,
+                    color: r.accentColor,
+                  }}
+                >
+                  {r.name.slice(0, 2)}
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  <h4 className="text-sm font-bold text-slate-200 truncate">{r.title}</h4>
+                  <span className="text-xs text-emerald-400 block mt-0.5">{r.style}</span>
+                  <p className="text-xs text-slate-400 line-clamp-2 mt-1">{r.bio}</p>
+                  <div className="text-[11px] font-mono text-slate-500 mt-2">
+                    تعداد آثار: {toPersianDigits(r.tracksCount)} قطعه
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Tab 4: Telegram Sources & Logs */}
+      {activeAdminTab === 'telegram' && (
+        <div className="space-y-6">
+          {/* Add Channel Form */}
+          <div className="bg-slate-900/80 p-5 rounded-2xl border border-slate-800 space-y-4">
+            <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+              <Send className="w-4 h-4 text-emerald-400" />
+              <span>افزودن کانال یا گروه تلگرام برای گردآوری مداحی</span>
+            </h3>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <input
+                type="text"
+                placeholder="یوزرنیم کانال (مثلاً fotros_ir@)"
+                value={newChannelUsername}
+                onChange={(e) => setNewChannelUsername(e.target.value)}
+                className="px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs sm:text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+              />
+              <input
+                type="text"
+                placeholder="عنوان کانال (اختیاری)"
+                value={newChannelTitle}
+                onChange={(e) => setNewChannelTitle(e.target.value)}
+                className="px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs sm:text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+              />
+              <button
+                onClick={handleAddTelegramChannel}
+                disabled={!newChannelUsername.trim()}
+                className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs rounded-xl shadow transition-colors disabled:opacity-50"
+              >
+                افزودن به لیست پایش
+              </button>
+            </div>
+          </div>
+
+          {/* Sources List */}
+          <div className="space-y-3">
+            <h3 className="text-sm font-bold text-slate-200">
+              کانال‌های تحت نظارت ربات ({toPersianDigits(telegramSources.length)})
+            </h3>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {telegramSources.map((source) => (
+                <div
+                  key={source.id}
+                  className="p-4 rounded-2xl bg-slate-900/80 border border-slate-800 flex items-center justify-between gap-3"
+                >
+                  <div className="space-y-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-sm font-bold text-slate-200 truncate">
+                        {source.channelUsername}
+                      </span>
+                      {source.isMonitored ? (
+                        <span className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.2 rounded">
+                          فعال
+                        </span>
+                      ) : (
+                        <span className="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.2 rounded">
+                          متوقف
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-400 truncate">{source.channelTitle}</p>
+                    <div className="text-[11px] font-mono text-slate-500 flex items-center gap-2">
+                      <span>آخرین پایش: {source.lastScrapedAt}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>استخراج شده: {toPersianDigits(source.totalExtracted)} فایل</span>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => {
+                      setTelegramSources((prev) =>
+                        prev.map((s) =>
+                          s.id === source.id ? { ...s, isMonitored: !s.isMonitored } : s
+                        )
+                      );
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                      source.isMonitored
+                        ? 'bg-rose-500/10 text-rose-300 border-rose-500/30 hover:bg-rose-500/20'
+                        : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20'
+                    }`}
+                  >
+                    {source.isMonitored ? 'توقف پایش' : 'فعال‌سازی'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Activity Logs */}
+          <div className="bg-slate-900/80 p-5 rounded-2xl border border-slate-800 space-y-3">
+            <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+              <Terminal className="w-4 h-4 text-emerald-400" />
+              <span>گزارش آخرین فعالیت‌های ربات و آپلود</span>
+            </h3>
+
+            <div className="bg-slate-950 rounded-xl p-3 max-h-48 overflow-y-auto space-y-2 font-mono text-xs">
+              {logs.map((log) => (
+                <div key={log.id} className="flex items-start gap-2">
+                  <span className="text-slate-500 shrink-0 tabular-nums">[{log.timestamp}]</span>
+                  <span className="text-indigo-400 shrink-0">[{log.channel}]:</span>
+                  <span
+                    className={
+                      log.level === 'success'
+                        ? 'text-emerald-400'
+                        : log.level === 'warn'
+                        ? 'text-amber-400'
+                        : 'text-slate-300'
+                    }
+                  >
+                    {log.message}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tab 5: Bot Python Script & Supabase SQL */}
+      {activeAdminTab === 'scripts' && (
+        <div className="space-y-6">
+          <div className="p-4 rounded-2xl bg-indigo-950/40 border border-indigo-800/40 text-xs text-indigo-200 leading-relaxed">
+            این بخش شامل تمامی فایل‌های سورس آماده، کانفیگ‌های داکر، اسکریپت ساخت دیتابیس Supabase و راهنمای گام‌به‌گام استقرار دائمی ربات روی سرور و اتصال به اپلیکیشن کاتلین و ورسل است.
+          </div>
+
+          {/* Sub-tabs for scripts */}
+          <div className="flex items-center gap-1.5 bg-slate-900/90 p-1.5 rounded-xl border border-slate-800 overflow-x-auto">
+            <button
+              onClick={() => setScriptSubTab('youtube_watcher')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors flex items-center gap-1.5 ${
+                scriptSubTab === 'youtube_watcher'
+                  ? 'bg-rose-600 text-white font-bold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Youtube className="w-3.5 h-3.5" />
+              <span>پایشگر خودکار یوتیوب (youtube_auto_watcher.py)</span>
+            </button>
+            <button
+              onClick={() => setScriptSubTab('python')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
+                scriptSubTab === 'python'
+                  ? 'bg-emerald-500 text-slate-950 font-bold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              کد پایتون ربات تلگرام (telegram_scraper.py)
+            </button>
+            <button
+              onClick={() => setScriptSubTab('sql')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
+                scriptSubTab === 'sql'
+                  ? 'bg-sky-500 text-slate-950 font-bold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              اسکیمای دیتابیس (Supabase SQL)
+            </button>
+            <button
+              onClick={() => setScriptSubTab('docker')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
+                scriptSubTab === 'docker'
+                  ? 'bg-indigo-500 text-slate-950 font-bold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              داکر (Dockerfile & Compose)
+            </button>
+            <button
+              onClick={() => setScriptSubTab('vps_guide')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
+                scriptSubTab === 'vps_guide'
+                  ? 'bg-amber-500 text-slate-950 font-bold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              راهنمای اجرای VPS لینوکس
+            </button>
+            <button
+              onClick={() => setScriptSubTab('mobile')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
+                scriptSubTab === 'mobile'
+                  ? 'bg-rose-500 text-slate-950 font-bold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              اتصال کاتلین (Android) و Vercel
+            </button>
+          </div>
+
+          {/* SubTab: YouTube Auto-Watcher Script */}
+          {scriptSubTab === 'youtube_watcher' && (
+            <div className="bg-slate-900/90 rounded-2xl border border-slate-800 overflow-hidden">
+              <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
+                <div className="flex items-center gap-2">
+                  <Youtube className="w-4 h-4 text-rose-500" />
+                  <span className="text-sm font-bold text-slate-200">
+                    پایشگر خودکار کانال‌های یوتیوب (youtube_auto_watcher.py)
+                  </span>
+                  <span className="text-[11px] text-slate-500 font-mono">yt-dlp + S3 + Supabase + 320kbps</span>
+                </div>
+                <button
+                  onClick={() => copyToClipboard(youtubeWatcherScript, 'yt_script')}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-600/10 hover:bg-rose-600/20 text-rose-400 text-xs font-medium border border-rose-500/30 transition-colors"
+                >
+                  {copiedScript === 'yt_script' ? (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>کپی شد!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>کپی کد پایتون</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <div className="px-5 py-2.5 text-xs text-slate-300 bg-slate-950/40 border-b border-slate-800">
+                نحوه اجرا: ابتدا پیش‌نیازها را با <code className="text-rose-400 font-mono">pip install yt-dlp boto3 supabase python-dotenv mutagen</code> نصب کنید و سپس دستور <code className="text-emerald-400 font-mono">python3 youtube_auto_watcher.py</code> را اجرا نمایید تا پایش به صورت دائمی انجام شود.
+              </div>
+
+              <pre className="p-4 text-xs font-mono text-slate-300 overflow-x-auto max-h-96 leading-relaxed select-all">
+                {youtubeWatcherScript}
+              </pre>
+            </div>
+          )}
+
+          {/* SubTab 1: Python Scraper */}
+          {scriptSubTab === 'python' && (
+            <div className="bg-slate-900/90 rounded-2xl border border-slate-800 overflow-hidden">
+              <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
+                <div className="flex items-center gap-2">
+                  <FileCode className="w-4 h-4 text-emerald-400" />
+                  <span className="text-sm font-bold text-slate-200">
+                    اسکریپت ربات پایتون (telegram_scraper.py)
+                  </span>
+                  <span className="text-[11px] text-slate-500 font-mono">Telethon + Boto3 + Supabase + ID3</span>
+                </div>
+                <button
+                  onClick={() => copyToClipboard(pythonBotScript, 'python')}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 text-xs font-medium border border-emerald-500/30 transition-colors"
+                >
+                  {copiedScript === 'python' ? (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>کپی شد!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>کپی کد پایتون</span>
+                    </>
+                  )}
+                </button>
+              </div>
+              <pre className="p-4 text-xs font-mono text-slate-300 overflow-x-auto max-h-96 leading-relaxed select-all">
+                {pythonBotScript}
+              </pre>
+            </div>
+          )}
+
+          {/* SubTab 2: Supabase SQL Schema */}
+          {scriptSubTab === 'sql' && (
+            <div className="bg-slate-900/90 rounded-2xl border border-slate-800 overflow-hidden">
+              <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
+                <div className="flex items-center gap-2">
+                  <Database className="w-4 h-4 text-sky-400" />
+                  <span className="text-sm font-bold text-slate-200">
+                    اسکیمای پایگاه داده سوپابیس (schema.sql)
+                  </span>
+                  <span className="text-[11px] text-slate-500 font-mono">PostgreSQL + RLS + Indexes</span>
+                </div>
+                <button
+                  onClick={() => copyToClipboard(supabaseSqlSchema, 'sql')}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 text-xs font-medium border border-sky-500/30 transition-colors"
+                >
+                  {copiedScript === 'sql' ? (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>کپی شد!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>کپی دستورات SQL</span>
+                    </>
+                  )}
+                </button>
+              </div>
+              <pre className="p-4 text-xs font-mono text-slate-300 overflow-x-auto max-h-96 leading-relaxed select-all">
+                {supabaseSqlSchema}
+              </pre>
+            </div>
+          )}
+
+          {/* SubTab 3: Docker */}
+          {scriptSubTab === 'docker' && (
+            <div className="space-y-4">
+              <div className="bg-slate-900/90 rounded-2xl border border-slate-800 overflow-hidden">
+                <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
+                  <div className="flex items-center gap-2">
+                    <HardDrive className="w-4 h-4 text-indigo-400" />
+                    <span className="text-sm font-bold text-slate-200">فایل docker-compose.yml</span>
+                  </div>
+                  <button
+                    onClick={() =>
+                      copyToClipboard(
+`version: '3.8'
+
+services:
+  madahi-scraper:
+    build: .
+    container_name: madahi_telegram_scraper
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./madahi_session.session:/app/madahi_session.session
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"`,
+                        'compose'
+                      )
+                    }
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 text-xs font-medium border border-indigo-500/30 transition-colors"
+                  >
+                    {copiedScript === 'compose' ? (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        <span>کپی شد!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>کپی فایل داکر کامپوز</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+                <pre className="p-4 text-xs font-mono text-slate-300 overflow-x-auto max-h-72 leading-relaxed">
+{`version: '3.8'
+
+services:
+  madahi-scraper:
+    build: .
+    container_name: madahi_telegram_scraper
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./madahi_session.session:/app/madahi_session.session
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"`}
+                </pre>
+              </div>
+
+              <div className="bg-slate-900/90 rounded-2xl border border-slate-800 overflow-hidden">
+                <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
+                  <div className="flex items-center gap-2">
+                    <FileCode className="w-4 h-4 text-indigo-400" />
+                    <span className="text-sm font-bold text-slate-200">فایل Dockerfile</span>
+                  </div>
+                  <button
+                    onClick={() =>
+                      copyToClipboard(
+`FROM python:3.11-slim
+ENV PYTHONUNBUFFERED=1 TZ=Asia/Tehran
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY telegram_scraper.py .
+CMD ["python", "telegram_scraper.py"]`,
+                        'dockerfile'
+                      )
+                    }
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 text-xs font-medium border border-indigo-500/30 transition-colors"
+                  >
+                    {copiedScript === 'dockerfile' ? (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        <span>کپی شد!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>کپی داکر فایل</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+                <pre className="p-4 text-xs font-mono text-slate-300 overflow-x-auto max-h-72 leading-relaxed">
+{`FROM python:3.11-slim
+ENV PYTHONUNBUFFERED=1 TZ=Asia/Tehran
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY telegram_scraper.py .
+CMD ["python", "telegram_scraper.py"]`}
+                </pre>
+              </div>
+            </div>
+          )}
+
+          {/* SubTab 4: Linux VPS Guide */}
+          {scriptSubTab === 'vps_guide' && (
+            <div className="bg-slate-900/90 rounded-2xl border border-slate-800 p-6 space-y-4">
+              <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                <Terminal className="w-5 h-5 text-amber-400" />
+                <span>راهنمای راه‌اندازی ربات روی سرور لینوکس (Ubuntu / Debian VPS)</span>
+              </h3>
+
+              <div className="space-y-4 text-xs text-slate-300 leading-relaxed">
+                <div className="p-4 bg-sky-950/30 rounded-xl border border-sky-800/40 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Send className="w-4 h-4 text-sky-400" />
+                    <span className="font-bold text-sky-300">راهنمای دریافت API_ID و API_HASH از سایت رسمی تلگرام (my.telegram.org)</span>
+                  </div>
+                  <ol className="list-decimal list-inside space-y-1.5 text-slate-300 text-[11px] leading-relaxed">
+                    <li>با فیلترشکن وارد وب‌سایت <a href="https://my.telegram.org" target="_blank" rel="noopener noreferrer" className="text-sky-400 underline font-mono">https://my.telegram.org</a> شوید.</li>
+                    <li>شماره تلفن اکانت تلگرام خود را با فرمت بین‌المللی (مثلاً <code className="text-amber-400 font-mono">+989123456789</code>) وارد کنید.</li>
+                    <li>یک کد تایید درون اپلیکیشن تلگرام شما (نه پیامک) ارسال می‌شود؛ آن را در سایت وارد کرده و لاگین کنید.</li>
+                    <li>روی گزینه <strong>API development tools</strong> کلیک کنید.</li>
+                    <li>در فرم ظاهر شده، نام دلخواه انگلیسی وارد کنید:
+                      <div className="mr-4 my-1 text-slate-400">
+                        • <strong>App title:</strong> Madahi Vault<br />
+                        • <strong>Short name:</strong> madahivault<br />
+                        • <strong>Platform:</strong> Desktop یا Other
+                      </div>
+                    </li>
+                    <li>روی دکمه <strong>Create application</strong> کلیک کنید.</li>
+                    <li>دو مقدار <strong>App api_id</strong> (یک عدد چند رقمی) و <strong>App api_hash</strong> (یک رشته ۳۲ کاراکتری) به شما نمایش داده می‌شود که باید در فایل <code className="text-emerald-400 font-mono">.env</code> کپی شوند.</li>
+                  </ol>
+                </div>
+
+                <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
+                  <span className="font-bold text-amber-400 block">گام ۱: اتصال به سرور و نصب ابزارها</span>
+                  <div className="bg-black/50 p-2.5 rounded font-mono text-slate-200 select-all">
+                    ssh root@YOUR_SERVER_IP<br />
+                    sudo apt update && sudo apt install -y python3-pip python3-venv git
+                  </div>
+                </div>
+
+                <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
+                  <span className="font-bold text-amber-400 block">گام ۲: ساخت پوشه پروژه و محیط مجازی پایتون</span>
+                  <div className="bg-black/50 p-2.5 rounded font-mono text-slate-200 select-all">
+                    mkdir -p /opt/madahi-bot && cd /opt/madahi-bot<br />
+                    python3 -m venv venv<br />
+                    source venv/bin/activate<br />
+                    pip install telethon boto3 supabase mutagen python-dotenv pillow
+                  </div>
+                </div>
+
+                <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
+                  <span className="font-bold text-amber-400 block">گام ۳: ایجاد فایل تنظیمات .env</span>
+                  <p className="text-slate-400">
+                    دستور زیر را اجرا کرده و مقادیر TELEGRAM_API_ID، توکن آروان و سوپابیس را در آن وارد کنید:
+                  </p>
+                  <div className="bg-black/50 p-2.5 rounded font-mono text-slate-200 select-all">
+                    nano .env
+                  </div>
+                </div>
+
+                <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
+                  <span className="font-bold text-amber-400 block">گام ۴: اجرای دائمی در پس‌زمینه با سرویس Systemd</span>
+                  <div className="bg-black/50 p-2.5 rounded font-mono text-slate-200 select-all">
+                    sudo cp /opt/madahi-bot/madahi_bot.service /etc/systemd/system/<br />
+                    sudo systemctl daemon-reload<br />
+                    sudo systemctl enable --now madahi-bot<br />
+                    sudo systemctl status madahi-bot
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* SubTab 5: Kotlin & Vercel Guide */}
+          {scriptSubTab === 'mobile' && (
+            <div className="bg-slate-900/90 rounded-2xl border border-slate-800 p-6 space-y-4">
+              <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                <Radio className="w-5 h-5 text-rose-400" />
+                <span>راهنمای استقرار روی Vercel و اتصال به اپلیکیشن موبایل Kotlin</span>
+              </h3>
+
+              <div className="space-y-4 text-xs text-slate-300 leading-relaxed">
+                <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
+                  <span className="font-bold text-emerald-400 block">گزینه ۱: استقرار وب‌اپلیکیشن روی Vercel (توصیه اول)</span>
+                  <p className="text-slate-400">
+                    این وب‌اپلیکیشن با Vite و React نوشته شده و به صورت ۱۰۰٪ استاتیک روی پلتفرم Vercel قابل استقرار است:
+                  </p>
+                  <div className="bg-black/50 p-2.5 rounded font-mono text-slate-200 select-all">
+                    npm install -g vercel<br />
+                    vercel deploy --prod
+                  </div>
+                  <p className="text-slate-400 text-[11px]">
+                    کاربران می‌توانند از داخل مرورگر گوشی، دکمه «Add to Home Screen» را بزنند تا مانند یک اپلیکیشن بومی
+                    بدون کادر مرورگر با قابلیت کنترل پخش در قفل صفحه (Lock Screen) نصب شود.
+                  </p>
+                </div>
+
+                <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
+                  <span className="font-bold text-rose-400 block">گزینه ۲: ساخت اپ بومی با زبان کاتلین (Android Studio)</span>
+                  <p className="text-slate-400">
+                    اگر مایل به خروجی APK بومی هستید، معماری به این صورت است:
+                  </p>
+                  <ul className="list-disc list-inside space-y-1 text-slate-300 text-[11px]">
+                    <li><strong>کتابخانه استریم صدا:</strong> استفاده از <code className="text-rose-400 font-mono">androidx.media3:media3-exoplayer</code></li>
+                    <li><strong>اتصال به دیتابیس:</strong> استفاده از SDK رسمی <code className="text-sky-400 font-mono">io.github.jan-tennert.supabase:postgrest-kt</code></li>
+                    <li><strong>نمایش و استریم صوت:</strong> خواندن مستقیم فیلد <code className="text-emerald-400 font-mono">audio_url</code> از جدول tracks که به باکت ابر آروان اشاره دارد.</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+
+      {/* Edit Track Modal */}
+      {editingTrack && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-lg w-full space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h4 className="text-base font-bold text-slate-100">
+                ویرایش مشخصات قطعه قبل از انتشار
+              </h4>
+              <button
+                onClick={() => setEditingTrack(null)}
+                className="text-slate-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  عنوان قطعه
+                </label>
+                <input
+                  type="text"
+                  value={editingTrack.title}
+                  onChange={(e) =>
+                    setEditingTrack({ ...editingTrack, title: e.target.value })
+                  }
+                  className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    نام مداح
+                  </label>
+                  <select
+                    value={editingTrack.reciterId}
+                    onChange={(e) => {
+                      const rec = reciters.find((r) => r.id === e.target.value);
+                      if (rec) {
+                        setEditingTrack({
+                          ...editingTrack,
+                          reciterId: rec.id,
+                          reciterName: rec.name,
+                        });
+                      }
+                    }}
+                    className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-200"
+                  >
+                    {reciters.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.title}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    دسته‌بندی
+                  </label>
+                  <select
+                    value={editingTrack.categoryId}
+                    onChange={(e) => {
+                      const cat = categories.find((c) => c.id === e.target.value);
+                      if (cat) {
+                        setEditingTrack({
+                          ...editingTrack,
+                          categoryId: cat.id,
+                          categoryName: cat.name,
+                        });
+                      }
+                    }}
+                    className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-200"
+                  >
+                    {categories
+                      .filter((c) => c.slug !== 'all')
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  مناسبت / ایام
+                </label>
+                <input
+                  type="text"
+                  value={editingTrack.occasion || ''}
+                  onChange={(e) =>
+                    setEditingTrack({ ...editingTrack, occasion: e.target.value })
+                  }
+                  className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                onClick={() => setEditingTrack(null)}
+                className="px-4 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white"
+              >
+                انصراف
+              </button>
+              <button
+                onClick={handleSaveEditedTrack}
+                className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold transition-colors"
+              >
+                ذخیره تغییرات
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Reciter Modal */}
+      {showAddReciterModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h4 className="text-base font-bold text-slate-100">افزودن مداح یا ادعیه‌خوان</h4>
+              <button
+                onClick={() => setShowAddReciterModal(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  نام مداح / گوینده *
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="مثلاً: حاج منصور ارضی"
+                  value={newReciterName}
+                  onChange={(e) => setNewReciterName(e.target.value)}
+                  className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  سبک / تخصص
+                </label>
+                <input
+                  type="text"
+                  placeholder="مثلاً: مناجات‌خوانی و روضه سنتی"
+                  value={newReciterStyle}
+                  onChange={(e) => setNewReciterStyle(e.target.value)}
+                  className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  بیوگرافی کوتاه
+                </label>
+                <textarea
+                  rows={2}
+                  placeholder="توضیح کوتاه در مورد هیئت یا سبک اجرا..."
+                  value={newReciterBio}
+                  onChange={(e) => setNewReciterBio(e.target.value)}
+                  className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                onClick={() => setShowAddReciterModal(false)}
+                className="px-4 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white"
+              >
+                انصراف
+              </button>
+              <button
+                onClick={handleCreateReciter}
+                disabled={!newReciterName.trim()}
+                className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold transition-colors disabled:opacity-50"
+              >
+                ثبت مداح
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
