@@ -116,3 +116,45 @@ export interface ScraperLog {
   message: string;
   level: 'info' | 'success' | 'warn' | 'error';
 }
+
+export interface YouTubeChannelSource {
+  id: string;
+  channelName: string;
+  channelHandle: string;
+  channelUrl: string;
+  isMonitored: boolean;
+  lastCheckedAt: string;
+  totalExtracted: number;
+  defaultReciterId: string;
+  defaultCategoryId: string;
+  autoApprove: boolean;
+}
+
+export interface DiscoveredVideo {
+  id: string;
+  channelId?: string;
+  channelName: string;
+  channelHandle?: string;
+  title: string;
+  duration: number;
+  url: string;
+  embedUrl: string;
+  thumbnailUrl: string;
+  discoveredAt: string;
+  defaultReciterId?: string;
+  defaultCategoryId?: string;
+}
+
+export interface BotConfig {
+  token: string;
+  username: string;
+  name: string;
+  targetChannel: string;
+  adminIds: string;
+  welcomeMessage: string;
+  channelCaptionTemplate: string;
+  autoPublishApproved: boolean;
+  botActive: boolean;
+  lastTestedAt: string | null;
+}
+

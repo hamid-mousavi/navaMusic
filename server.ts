@@ -15,6 +15,13 @@ import {
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { createServer as createViteServer } from 'vite';
+import { localDb, Track as DbTrack } from './server/db.js';
+import {
+  testTelegramToken,
+  sendChannelTestMessage,
+  publishTrackToTelegramChannel,
+} from './server/telegram.js';
+import { youtubeMonitor } from './server/youtubeMonitor.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -44,6 +51,65 @@ interface ArvanConfig {
   region: string;
   cdnDomain: string;
 }
+
+// Data directory for persistent storage (e.g. YouTube cookies)
+const DATA_DIR = path.join(process.cwd(), 'data');
+const YOUTUBE_COOKIES_PATH = path.join(DATA_DIR, 'youtube_cookies.txt');
+
+try {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+} catch (_) {}
+
+// Locate yt-dlp binary (bundled local bin, system /usr/local/bin, or PATH)
+const getYtDlpPath = (): string => {
+  const localBin = path.join(process.cwd(), 'bin', 'yt-dlp');
+  if (fs.existsSync(localBin)) {
+    try {
+      fs.chmodSync(localBin, 0o755);
+    } catch (_) {}
+    return localBin;
+  }
+  if (fs.existsSync('/usr/local/bin/yt-dlp')) {
+    return '/usr/local/bin/yt-dlp';
+  }
+  return 'yt-dlp';
+};
+
+// Check if valid YouTube cookies are configured
+const getYouTubeCookiesInfo = () => {
+  if (fs.existsSync(YOUTUBE_COOKIES_PATH)) {
+    try {
+      const stat = fs.statSync(YOUTUBE_COOKIES_PATH);
+      if (stat.size > 20) {
+        const text = fs.readFileSync(YOUTUBE_COOKIES_PATH, 'utf8');
+        const validLines = text
+          .split('\n')
+          .filter((l) => l.trim() && !l.trim().startsWith('#'));
+        
+        // Check if essential authentication cookies are present (LOGIN_INFO, __Secure-3PSID, SID, SAPISID)
+        const hasAuthCookies = /LOGIN_INFO|__Secure-3PSID|__Secure-1PSID|\bSID\b|SAPISID/i.test(text);
+        const hasLoginInfo = /LOGIN_INFO/i.test(text);
+
+        return {
+          configured: true,
+          entryCount: validLines.length,
+          sizeBytes: stat.size,
+          lastModified: stat.mtime.toISOString(),
+          hasAuthCookies,
+          hasLoginInfo,
+        };
+      }
+    } catch (_) {}
+  }
+  return {
+    configured: false,
+    entryCount: 0,
+    sizeBytes: 0,
+    lastModified: null,
+    hasAuthCookies: false,
+    hasLoginInfo: false,
+  };
+};
 
 // Helpers to sanitize and normalize S3 parameters
 const normalizeEndpoint = (raw?: string): string => {
@@ -402,6 +468,332 @@ app.delete('/api/storage/file', async (req, res) => {
   }
 });
 
+// API: Get YouTube Cookies Status
+app.get('/api/youtube/cookies', (req, res) => {
+  try {
+    const info = getYouTubeCookiesInfo();
+    res.json({
+      success: true,
+      ...info,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: 'خطا در بررسی وضعیت کوکی‌ها: ' + error.message });
+  }
+});
+
+// API: Save / Update YouTube Cookies
+app.post('/api/youtube/cookies', (req, res) => {
+  try {
+    const { cookiesContent } = req.body;
+    if (!cookiesContent || typeof cookiesContent !== 'string' || cookiesContent.trim().length < 15) {
+      return res.status(400).json({
+        error: 'محتوای کوکی نامعتبر یا خالی است. لطفاً متن کوکی خروجی گرفته‌شده به فرمت Netscape را وارد کنید.',
+      });
+    }
+
+    const cleanContent = cookiesContent.trim();
+    fs.writeFileSync(YOUTUBE_COOKIES_PATH, cleanContent, 'utf8');
+
+    const info = getYouTubeCookiesInfo();
+    res.json({
+      success: true,
+      message: `کوکی‌های یوتیوب با موفقیت ذخیره شدند (${info.entryCount} ورودی شناسایی شد). اکنون می‌توانید ویدیوهای محافظت‌شده یوتیوب را استخراج کنید.`,
+      ...info,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: 'خطا در ذخیره کوکی‌ها: ' + error.message });
+  }
+});
+
+// API: Delete YouTube Cookies
+app.delete('/api/youtube/cookies', (req, res) => {
+  try {
+    if (fs.existsSync(YOUTUBE_COOKIES_PATH)) {
+      fs.unlinkSync(YOUTUBE_COOKIES_PATH);
+    }
+    res.json({
+      success: true,
+      message: 'فایل کوکی‌های یوتیوب با موفقیت حذف شد.',
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: 'خطا در حذف کوکی‌ها: ' + error.message });
+  }
+});
+
+const getS3Helpers = () => {
+  const s3 = getS3Client();
+  if (!s3) return null;
+  return {
+    s3,
+    bucketName: activeArvanConfig.bucketName,
+    resolvePublicUrl: (key: string) => resolvePublicUrl(key),
+  };
+};
+
+// ==========================================
+// YouTube Channel Monitoring & Auto-Scraper
+// ==========================================
+
+// 1. List YouTube Channels
+app.get('/api/youtube/channels', (req, res) => {
+  res.json({ success: true, channels: localDb.getYoutubeChannels() });
+});
+
+// 2. Add YouTube Channel to monitor
+app.post('/api/youtube/channels', (req, res) => {
+  try {
+    const {
+      channelName,
+      channelHandle,
+      channelUrl,
+      defaultReciterId,
+      defaultCategoryId,
+      autoApprove,
+      isMonitored,
+    } = req.body;
+
+    if (!channelName || (!channelHandle && !channelUrl)) {
+      return res.status(400).json({ error: 'نام و هندل یا آدرس کانال یوتیوب الزامی است.' });
+    }
+
+    const newChannel = {
+      id: `yt-${Date.now()}`,
+      channelName: String(channelName).trim(),
+      channelHandle: String(channelHandle || '').trim(),
+      channelUrl: String(channelUrl || channelHandle || '').trim(),
+      isMonitored: isMonitored !== undefined ? !!isMonitored : true,
+      lastCheckedAt: 'همین الان',
+      totalExtracted: 0,
+      defaultReciterId: defaultReciterId || 'rec-karimi',
+      defaultCategoryId: defaultCategoryId || 'cat-moharram',
+      autoApprove: !!autoApprove,
+    };
+
+    const saved = localDb.addYoutubeChannel(newChannel);
+    localDb.addLog({
+      id: `log-${Date.now()}`,
+      timestamp: new Date().toLocaleTimeString('fa-IR'),
+      channel: 'پایش یوتیوب',
+      message: `کانال جدید «${saved.channelName}» برای پایش خودکار ثبت شد.`,
+      level: 'success',
+    });
+
+    res.json({ success: true, channel: saved });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// 3. Update YouTube Channel
+app.put('/api/youtube/channels/:id', (req, res) => {
+  const updated = localDb.updateYoutubeChannel(req.params.id, req.body);
+  if (!updated) return res.status(404).json({ error: 'کانال یافت نشد.' });
+  res.json({ success: true, channel: updated });
+});
+
+// 4. Delete YouTube Channel
+app.delete('/api/youtube/channels/:id', (req, res) => {
+  const ok = localDb.deleteYoutubeChannel(req.params.id);
+  res.json({ success: ok, message: ok ? 'کانال حذف شد.' : 'کانال یافت نشد.' });
+});
+
+// 5. Preview latest videos of a channel without downloading
+app.post('/api/youtube/preview-channel', async (req, res) => {
+  try {
+    const { url, handle } = req.body;
+    const target = url || handle;
+    if (!target) return res.status(400).json({ error: 'آدرس یا هندل کانال الزامی است.' });
+    const videos = await youtubeMonitor.fetchChannelVideos(target, 5);
+    res.json({ success: true, videos });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5.1. Get Discovered YouTube Videos Pending Approval
+app.get('/api/youtube/discovered', (req, res) => {
+  res.json({ success: true, videos: localDb.getDiscoveredVideos() });
+});
+
+// 5.2. Approve and Convert Discovered Video to S3 Track
+app.post('/api/youtube/approve-discovered', async (req, res) => {
+  try {
+    const helpers = getS3Helpers();
+    if (!helpers) {
+      return res.status(400).json({
+        error: 'کلیدهای ابر آروان تنظیم نشده‌اند. ابتدا در تب همگام‌سازی استوریج، اتصال باکت را بررسی کنید.',
+      });
+    }
+
+    const { videoId, customTitle, reciterId, categoryId, bitrate } = req.body;
+    if (!videoId) {
+      return res.status(400).json({ error: 'شناسه ویدیو (videoId) ارسال نشده است.' });
+    }
+
+    const track = await youtubeMonitor.approveAndExtractVideo(
+      {
+        id: videoId,
+        title: customTitle,
+        reciterId,
+        categoryId,
+        bitrate,
+      },
+      helpers
+    );
+
+    res.json({
+      success: true,
+      track,
+      discoveredVideos: localDb.getDiscoveredVideos(),
+      message: `قطعه صوتی «${track.title}» با موفقیت تبدیل و به صف بررسی افزوده شد.`,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5.3. Dismiss Discovered Video (or clear all)
+app.post('/api/youtube/dismiss-discovered', (req, res) => {
+  const { videoId, clearAll } = req.body;
+  if (clearAll) {
+    localDb.clearDiscoveredVideos();
+  } else if (videoId) {
+    localDb.removeDiscoveredVideo(videoId);
+  }
+  res.json({ success: true, discoveredVideos: localDb.getDiscoveredVideos() });
+});
+
+// 5.4. Fast Media Info & Playback Resolver for Single Video / Media URLs
+app.post('/api/media-info', async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url || !String(url).trim()) {
+      return res.status(400).json({ error: 'آدرس URL ارسال نشده است.' });
+    }
+    const cleanUrl = String(url).trim().replace(/^["'`]+|["'`]+$/g, '');
+
+    // 1. YouTube Link Detection
+    const ytMatch = cleanUrl.match(
+      /(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/))([\w-]{11})/i
+    );
+    if (ytMatch) {
+      const videoId = ytMatch[1];
+      const playbackUrl = `https://www.youtube.com/watch?v=${videoId}`;
+      const embedUrl = `https://www.youtube.com/embed/${videoId}?autoplay=1`;
+      const thumbnailUrl = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+
+      // Fast oEmbed lookup for official title & author
+      let title = 'ویدیوی یوتیوب';
+      let author = 'یوتیوب';
+      let authorUrl = '';
+
+      try {
+        const oembedRes = await fetch(
+          `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
+          { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(6000) }
+        );
+        if (oembedRes.ok) {
+          const oembedData: any = await oembedRes.json();
+          if (oembedData.title) title = oembedData.title;
+          if (oembedData.author_name) author = oembedData.author_name;
+          if (oembedData.author_url) authorUrl = oembedData.author_url;
+        }
+      } catch (oeErr) {
+        console.warn('[MediaInfo] oEmbed fallback notice:', oeErr);
+      }
+
+      return res.json({
+        success: true,
+        sourceType: 'youtube',
+        id: videoId,
+        title,
+        uploader: author,
+        authorUrl,
+        thumbnail: thumbnailUrl,
+        embedUrl,
+        playbackUrl,
+        duration: 240,
+      });
+    }
+
+    // 2. Aparat Video Detection
+    const aparatMatch = cleanUrl.match(/aparat\.com\/v\/([a-zA-Z0-9]+)/i);
+    if (aparatMatch) {
+      const vidHash = aparatMatch[1];
+      return res.json({
+        success: true,
+        sourceType: 'aparat',
+        id: vidHash,
+        title: `ویدیوی آپارات (${vidHash})`,
+        uploader: 'آپارات',
+        authorUrl: cleanUrl,
+        thumbnail: '',
+        embedUrl: `https://www.aparat.com/video/video/embed/videohash/${vidHash}/vt/frame`,
+        playbackUrl: cleanUrl,
+        duration: 210,
+      });
+    }
+
+    // 3. Direct Audio / Video Media URLs
+    const isDirectAudio = /\.(mp3|m4a|wav|aac|ogg)(\?.*)?$/i.test(cleanUrl);
+    const isDirectVideo = /\.(mp4|mkv|webm|mov)(\?.*)?$/i.test(cleanUrl);
+    const urlFilename = cleanUrl.split('/').pop()?.split('?')[0] || 'فایل رسانه';
+
+    return res.json({
+      success: true,
+      sourceType: isDirectAudio ? 'direct_audio' : isDirectVideo ? 'direct_video' : 'web_page',
+      id: `media-${Date.now()}`,
+      title: decodeURIComponent(urlFilename).replace(/\.[^/.]+$/, ''),
+      uploader: 'لینک مستقیم وب',
+      authorUrl: cleanUrl,
+      thumbnail: '',
+      embedUrl: null,
+      playbackUrl: cleanUrl,
+      duration: 180,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'خطا در دریافت اطلاعات رسانه' });
+  }
+});
+
+// 6. Scan a specific channel immediately (discovers and lists videos)
+app.post('/api/youtube/channels/:id/scan', async (req, res) => {
+  try {
+    const helpers = getS3Helpers();
+    const result = await youtubeMonitor.scanSingleChannel(req.params.id, helpers || undefined);
+    res.json({ success: true, result, discoveredVideos: localDb.getDiscoveredVideos() });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 7. Scan all monitored YouTube channels immediately (discovers and lists videos)
+app.post('/api/youtube/scan-all', async (req, res) => {
+  try {
+    const helpers = getS3Helpers();
+    const summary = await youtubeMonitor.scanAllMonitored(helpers || undefined);
+    res.json({ success: true, summary, discoveredVideos: localDb.getDiscoveredVideos() });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 8. Get Monitor Status
+app.get('/api/youtube/monitor/status', (req, res) => {
+  res.json({ success: true, status: youtubeMonitor.getStatus() });
+});
+
+// 9. Toggle Auto-Monitoring Schedule
+app.post('/api/youtube/monitor/toggle', (req, res) => {
+  const { enabled, intervalMinutes } = req.body;
+  if (enabled) {
+    youtubeMonitor.startAutoMonitoring(intervalMinutes || 30, getS3Helpers);
+  } else {
+    youtubeMonitor.stopAutoMonitoring();
+  }
+  res.json({ success: true, status: youtubeMonitor.getStatus() });
+});
+
 // API: Real Upload to ArvanCloud S3
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
@@ -438,6 +830,43 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
     const publicUrl = resolvePublicUrl(s3Key);
 
+    const reciterId = req.body?.reciterId || 'rec-karimi';
+    const reciterObj = localDb.getReciters().find((r) => r.id === reciterId);
+    const reciterName = reciterObj?.name || req.body?.reciterName || 'حاج محمود کریمی';
+    const categoryId = req.body?.categoryId || 'cat-moharram';
+    const categoryObj = localDb.getCategories().find((c) => c.id === categoryId);
+    const categoryName = categoryObj?.name || req.body?.categoryName || 'محرم و عاشورا';
+    const trackTitle = (req.body?.title && String(req.body.title).trim()) || file.originalname.replace(/\.[^/.]+$/, '');
+
+    const newQueueItem = localDb.addToQueue({
+      id: `queue-${Date.now()}`,
+      title: trackTitle,
+      reciterId,
+      reciterName,
+      categoryId,
+      categoryName,
+      duration: Number(req.body?.duration) || 240,
+      audioUrl: publicUrl,
+      coverUrl: req.body?.coverUrl || '',
+      fileSizeMb,
+      bitrate: '320 kbps',
+      lyrics: [],
+      status: 'pending',
+      sourceType: 'manual_upload',
+      playCount: 0,
+      createdAt: 'همین الان (آپلود فایل)',
+      s3Key,
+      tags: ['آپلود فایل', reciterName],
+    });
+
+    localDb.addLog({
+      id: `log-${Date.now()}`,
+      timestamp: new Date().toLocaleTimeString('fa-IR'),
+      channel: 'آپلود فایل',
+      message: `فایل صوتی «${trackTitle}» با موفقیت آپلود و در صف بررسی ثبت شد.`,
+      level: 'success',
+    });
+
     return res.json({
       success: true,
       realUpload: true,
@@ -445,7 +874,8 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
       s3Key,
       fileSizeMb,
       fileName: file.originalname,
-      message: `فایل صوتی با موفقیت در باکت «${bucketName}» ابر آروان آپلود و ذخیره گردید.`,
+      queueItem: newQueueItem,
+      message: `فایل صوتی با موفقیت در باکت «${bucketName}» ابر آروان آپلود و در صف بررسی ذخیره گردید.`,
     });
   } catch (error: any) {
     console.error('Upload Error:', error);
@@ -483,6 +913,7 @@ app.post('/api/extract-url', async (req, res) => {
     }
 
     const isDirectAudio = cleanUrl.match(/\.(mp3|m4a|ogg|wav|aac|flac)($|\?)/i);
+    const isDirectVideo = cleanUrl.match(/\.(mp4|mov|webm|mkv|avi)($|\?)/i);
 
     // Direct audio URL fast-path
     if (isDirectAudio) {
@@ -524,6 +955,103 @@ app.post('/api/extract-url', async (req, res) => {
       });
     }
 
+    // Direct video URL fast-path (convert to MP3 via ffmpeg directly)
+    if (isDirectVideo) {
+      console.log(`[Extract] Processing direct video URL via ffmpeg: ${cleanUrl}`);
+      const tempId = `${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      tempDir = path.join(os.tmpdir(), `direct_vid_${tempId}`);
+      fs.mkdirSync(tempDir, { recursive: true });
+
+      const videoResponse = await fetch(cleanUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      });
+      if (!videoResponse.ok) {
+        throw new Error(`دانلود ویدیو از آدرس مستقیم ناموفق بود (${videoResponse.status} ${videoResponse.statusText})`);
+      }
+      const arrayBuffer = await videoResponse.arrayBuffer();
+      const rawVideoPath = path.join(tempDir, 'source_video.mp4');
+      fs.writeFileSync(rawVideoPath, Buffer.from(arrayBuffer));
+
+      const outAudioPath = path.join(tempDir, 'output.mp3');
+      const selectedAudioBitrate = bitrate === '128' ? '128k' : '320k';
+      await execFileAsync('ffmpeg', [
+        '-i', rawVideoPath,
+        '-vn',
+        '-c:a', 'libmp3lame',
+        '-b:a', selectedAudioBitrate,
+        '-y',
+        outAudioPath,
+      ]);
+
+      const audioBuffer = fs.readFileSync(outAudioPath);
+      const fileSizeMb = parseFloat((audioBuffer.length / (1024 * 1024)).toFixed(2));
+      const s3Key = `incoming/video/${Date.now()}_converted.mp3`;
+
+      await s3.send(
+        new PutObjectCommand({
+          Bucket: bucketName,
+          Key: s3Key,
+          Body: audioBuffer,
+          ContentType: 'audio/mpeg',
+          CacheControl: 'public, max-age=31536000',
+          ACL: 'public-read',
+        })
+      );
+
+      const publicUrl = resolvePublicUrl(s3Key);
+
+      const targetReciterId = req.body?.reciterId || 'rec-karimi';
+      const reciterObj = localDb.getReciters().find((r) => r.id === targetReciterId);
+      const targetReciterName = reciterObj?.name || req.body?.reciterName || 'حاج محمود کریمی';
+      const targetCategoryId = categoryId || 'cat-moharram';
+      const categoryObj = localDb.getCategories().find((c) => c.id === targetCategoryId);
+      const targetCategoryName = categoryObj?.name || 'محرم و عاشورا';
+      const directTitle = title || 'صوت استخراج شده از ویدیو مستقیم';
+
+      const queueItem = localDb.addToQueue({
+        id: `queue-${Date.now()}`,
+        title: directTitle,
+        reciterId: targetReciterId,
+        reciterName: targetReciterName,
+        categoryId: targetCategoryId,
+        categoryName: targetCategoryName,
+        duration: 240,
+        audioUrl: publicUrl,
+        coverUrl: '',
+        fileSizeMb,
+        bitrate: `${selectedAudioBitrate}bps`,
+        lyrics: [],
+        status: 'pending',
+        sourceType: 'web_url',
+        sourceUrl: cleanUrl,
+        playCount: 0,
+        createdAt: 'همین الان (تبدیل ویدیو مستقیم)',
+        s3Key,
+        tags: ['ویدیو مستقیم', targetReciterName],
+      });
+
+      localDb.addLog({
+        id: `log-${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString('fa-IR'),
+        channel: 'تبدیل ویدیو',
+        message: `ویدیو با موفقیت به MP3 تبدیل و در صف بررسی ذخیره شد: «${directTitle}»`,
+        level: 'success',
+      });
+
+      return res.json({
+        success: true,
+        realUpload: true,
+        url: publicUrl,
+        s3Key,
+        fileSizeMb,
+        title: directTitle,
+        duration: 240,
+        coverUrl: '',
+        queueItem,
+        message: `ویدیو با موفقیت به صوت MP3 تبدیل، در باکت «${bucketName}» ذخیره و به صف بررسی افزوده شد.`,
+      });
+    }
+
     // Process YouTube or online video/audio page via yt-dlp
     console.log(`[Extract] Starting yt-dlp media extraction for URL: ${cleanUrl}`);
     const tempId = `${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -531,6 +1059,8 @@ app.post('/api/extract-url', async (req, res) => {
     fs.mkdirSync(tempDir, { recursive: true });
 
     const selectedQuality = bitrate === '320' ? '320k' : '128k';
+    const ytdlBinary = getYtDlpPath();
+
     const ytdlArgs = [
       '-x',
       '--audio-format',
@@ -544,15 +1074,31 @@ app.post('/api/extract-url', async (req, res) => {
       `thumbnail:${tempDir}/thumb.%(ext)s`,
       '--print-json',
       '--no-playlist',
+      '--no-check-certificates',
       '--max-filesize',
       '150M',
-      cleanUrl,
     ];
+
+    // Check if user has uploaded YouTube cookies
+    const cookiesInfo = getYouTubeCookiesInfo();
+    if (cookiesInfo.configured) {
+      console.log(`[Extract] Using authenticated YouTube cookies (${cookiesInfo.entryCount} entries)`);
+      ytdlArgs.push('--cookies', YOUTUBE_COOKIES_PATH);
+    } else {
+      // Use resilient player client fallbacks
+      ytdlArgs.push('--extractor-args', 'youtube:player_client=android,web');
+    }
+
+    // Enable Node.js as JavaScript runtime for solving YouTube JS challenges
+    const nodeBinaryPath = process.execPath || '/usr/local/bin/node';
+    ytdlArgs.push('--js-runtimes', `node:${nodeBinaryPath}`);
+
+    ytdlArgs.push(cleanUrl);
 
     let stdout = '';
     let stderr = '';
     try {
-      const execResult = await execFileAsync('yt-dlp', ytdlArgs, {
+      const execResult = await execFileAsync(ytdlBinary, ytdlArgs, {
         timeout: 120000, // 2 minutes max
         maxBuffer: 10 * 1024 * 1024,
       });
@@ -562,19 +1108,25 @@ app.post('/api/extract-url', async (req, res) => {
       console.error('[Extract] yt-dlp execution error:', execErr.message, execErr.stderr);
       const errorMsg = String(execErr.stderr || execErr.message || '');
       let friendlyMsg = 'خطا در دریافت و تبدیل ویدیو به صوت.';
-      if (errorMsg.includes('Video unavailable') || errorMsg.includes('does not exist')) {
+      let requiresCookies = false;
+
+      if (errorMsg.includes('Sign in to confirm')) {
+        requiresCookies = true;
+        friendlyMsg =
+          'یوتیوب این ویدیو را نیازمند تایید هویت تشخیص داده است (Sign in to confirm you are not a bot). برای رفع این مشکل، لطفاً کوکی‌های یوتیوب خود را در بخش «تنظیمات کوکی یوتیوب» وارد کنید، یا از لینک مستقیم فایل استفاده نمایید.';
+      } else if (errorMsg.includes('Video unavailable') || errorMsg.includes('does not exist')) {
         friendlyMsg = 'این ویدیو در یوتیوب موجود نیست یا حذف شده است.';
       } else if (errorMsg.includes('Private video')) {
         friendlyMsg = 'این ویدیو خصوصی (Private) است و امکان استخراج آن وجود ندارد.';
-      } else if (errorMsg.includes('Sign in to confirm')) {
-        friendlyMsg = 'یوتیوب نیاز به تایید دارد؛ لطفاً از لینک‌های عمومی یا لینک مستقیم فایل استفاده کنید.';
       } else if (errorMsg.includes('Requested format is not available')) {
         friendlyMsg = 'فرمت مناسب صوتی برای این ویدیو یافت نشد.';
       } else if (errorMsg.includes('timed out')) {
         friendlyMsg = 'مدت زمان استخراج از یوتیوب به پایان رسید (Timeout).';
       }
+
       return res.status(400).json({
         error: friendlyMsg,
+        requiresCookies,
         details: errorMsg.slice(0, 300),
       });
     }
@@ -653,6 +1205,44 @@ app.post('/api/extract-url', async (req, res) => {
       }
     }
 
+    const reciterId = req.body?.reciterId || 'rec-karimi';
+    const reciterObj = localDb.getReciters().find((r) => r.id === reciterId);
+    const resolvedReciterName = reciterObj?.name || req.body?.reciterName || meta.uploader || 'حاج محمود کریمی';
+    const catId = categoryId || 'cat-moharram';
+    const catObj = localDb.getCategories().find((c) => c.id === catId);
+    const resolvedCatName = catObj?.name || 'محرم و عاشورا';
+
+    const queueItem = localDb.addToQueue({
+      id: `queue-${Date.now()}`,
+      title: finalTitle,
+      reciterId,
+      reciterName: resolvedReciterName,
+      categoryId: catId,
+      categoryName: resolvedCatName,
+      duration: meta.duration || 210,
+      audioUrl: publicAudioUrl,
+      coverUrl: publicCoverUrl,
+      fileSizeMb,
+      bitrate: `${selectedQuality}bps`,
+      lyrics: [],
+      status: 'pending',
+      sourceType: 'youtube',
+      sourceUrl: cleanUrl,
+      sourceChannelName: meta.uploader || '',
+      playCount: 0,
+      createdAt: 'همین الان (استخراج یوتیوب)',
+      s3Key,
+      tags: ['یوتیوب', resolvedReciterName],
+    });
+
+    localDb.addLog({
+      id: `log-${Date.now()}`,
+      timestamp: new Date().toLocaleTimeString('fa-IR'),
+      channel: 'یوتیوب استودیو',
+      message: `صوت «${finalTitle}» از یوتیوب استخراج، در استوریج ذخیره و در صف بررسی ثبت شد.`,
+      level: 'success',
+    });
+
     return res.json({
       success: true,
       realUpload: true,
@@ -664,7 +1254,8 @@ app.post('/api/extract-url', async (req, res) => {
       coverUrl: publicCoverUrl,
       uploader: meta.uploader || 'یوتیوب',
       bitrate: `${selectedQuality}bps`,
-      message: `ویدیو با موفقیت دریافت، به MP3 تبدیل و در باکت «${bucketName}» ابر آروان ذخیره شد.`,
+      queueItem,
+      message: `ویدیو با موفقیت دریافت، به MP3 تبدیل، در باکت «${bucketName}» ذخیره و در صف بررسی ثبت شد.`,
     });
   } catch (error: any) {
     console.error('URL Extraction Error:', error);
@@ -682,7 +1273,261 @@ app.post('/api/extract-url', async (req, res) => {
   }
 });
 
-// Mount Vite or serve static dist
+// ==========================================
+// Local Database & Telegram Bot API Routes
+// ==========================================
+
+// 1. Get entire database state
+app.get('/api/db/all', (req, res) => {
+  try {
+    res.json({ success: true, data: localDb.getAll() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2. Tracks CRUD
+app.get('/api/tracks', (req, res) => {
+  res.json({ success: true, tracks: localDb.getTracks() });
+});
+
+app.post('/api/tracks', (req, res) => {
+  try {
+    const track = localDb.addTrack(req.body);
+    res.json({ success: true, track });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.put('/api/tracks/:id', (req, res) => {
+  const updated = localDb.updateTrack(req.params.id, req.body);
+  if (!updated) return res.status(404).json({ error: 'قطعه مورد نظر یافت نشد.' });
+  res.json({ success: true, track: updated });
+});
+
+app.delete('/api/tracks/:id', (req, res) => {
+  const ok = localDb.deleteTrack(req.params.id);
+  res.json({ success: ok, message: ok ? 'قطعه با موفقیت حذف شد.' : 'قطعه یافت نشد.' });
+});
+
+// 3. Queue CRUD & Approval
+app.get('/api/queue', (req, res) => {
+  res.json({ success: true, queue: localDb.getPendingQueue() });
+});
+
+app.post('/api/queue', (req, res) => {
+  try {
+    const item = localDb.addToQueue(req.body);
+    res.json({ success: true, item });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.put('/api/queue/:id', (req, res) => {
+  const updated = localDb.updateQueueItem(req.params.id, req.body);
+  if (!updated) return res.status(404).json({ error: 'آیتم صف یافت نشد.' });
+  res.json({ success: true, item: updated });
+});
+
+app.delete('/api/queue/:id', (req, res) => {
+  const ok = localDb.deleteQueueItem(req.params.id);
+  res.json({ success: ok, message: ok ? 'از صف بررسی حذف شد.' : 'آیتم یافت نشد.' });
+});
+
+app.post('/api/queue/:id/approve', async (req, res) => {
+  try {
+    const { overrides, publishToTelegram } = req.body || {};
+    const approved = localDb.approveQueueItem(req.params.id, overrides);
+    if (!approved) {
+      return res.status(404).json({ error: 'آیتم مورد نظر در صف یافت نشد.' });
+    }
+
+    let telegramResult: any = null;
+    const botConfig = localDb.getBotConfig();
+    if (publishToTelegram || botConfig.autoPublishApproved) {
+      if (botConfig.token && botConfig.targetChannel) {
+        telegramResult = await publishTrackToTelegramChannel(approved, botConfig);
+        if (telegramResult.success) {
+          localDb.addLog({
+            id: `log-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString('fa-IR'),
+            channel: 'کانال تلگرام',
+            message: `قطعه «${approved.title}» همزمان با تأیید، در کانال منتشر گردید.`,
+            level: 'success',
+          });
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      track: approved,
+      telegram: telegramResult,
+      message: 'قطعه با موفقیت تأیید و به فهرست اصلی منتقل شد.',
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: 'خطا در تأیید قطعه: ' + err.message });
+  }
+});
+
+// 4. Reciters CRUD
+app.get('/api/reciters', (req, res) => {
+  res.json({ success: true, reciters: localDb.getReciters() });
+});
+
+app.post('/api/reciters', (req, res) => {
+  try {
+    const newReciter = {
+      id: req.body.id || `rec-${Date.now()}`,
+      name: String(req.body.name).trim(),
+      title: req.body.title ? String(req.body.title).trim() : String(req.body.name).trim(),
+      bio: req.body.bio || '',
+      avatarUrl: req.body.avatarUrl || '',
+      tracksCount: Number(req.body.tracksCount) || 0,
+      style: req.body.style || 'شور، زمینه و روضه',
+      accentColor: req.body.accentColor || '#10b981',
+    };
+    const saved = localDb.addReciter(newReciter);
+    localDb.addLog({
+      id: `log-${Date.now()}`,
+      timestamp: new Date().toLocaleTimeString('fa-IR'),
+      channel: 'مداحان',
+      message: `مداح جدید «${saved.name}» به پایگاه داده افزوده شد.`,
+      level: 'success',
+    });
+    res.json({ success: true, reciter: saved });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.put('/api/reciters/:id', (req, res) => {
+  const updated = localDb.updateReciter(req.params.id, req.body);
+  if (!updated) return res.status(404).json({ error: 'مداح یافت نشد.' });
+  res.json({ success: true, reciter: updated });
+});
+
+app.delete('/api/reciters/:id', (req, res) => {
+  const ok = localDb.deleteReciter(req.params.id);
+  res.json({ success: ok, message: ok ? 'مداح با موفقیت حذف شد.' : 'مداح یافت نشد.' });
+});
+
+// 5. Categories CRUD
+app.get('/api/categories', (req, res) => {
+  res.json({ success: true, categories: localDb.getCategories() });
+});
+
+app.post('/api/categories', (req, res) => {
+  try {
+    const newCat = {
+      id: req.body.id || `cat-${Date.now()}`,
+      name: String(req.body.name).trim(),
+      slug: req.body.slug ? String(req.body.slug).trim() : `cat-${Date.now()}`,
+      iconName: req.body.iconName || 'Flame',
+      tracksCount: Number(req.body.tracksCount) || 0,
+      description: req.body.description || '',
+    };
+    const saved = localDb.addCategory(newCat);
+    res.json({ success: true, category: saved });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.put('/api/categories/:id', (req, res) => {
+  const updated = localDb.updateCategory(req.params.id, req.body);
+  if (!updated) return res.status(404).json({ error: 'دسته‌بندی یافت نشد.' });
+  res.json({ success: true, category: updated });
+});
+
+app.delete('/api/categories/:id', (req, res) => {
+  const ok = localDb.deleteCategory(req.params.id);
+  res.json({ success: ok, message: ok ? 'دسته‌بندی حذف شد.' : 'دسته‌بندی یافت نشد.' });
+});
+
+// 6. Telegram Bot Config & Actions
+app.get('/api/bot/config', (req, res) => {
+  res.json({ success: true, config: localDb.getBotConfig() });
+});
+
+app.post('/api/bot/config', (req, res) => {
+  const updated = localDb.updateBotConfig(req.body);
+  res.json({ success: true, config: updated });
+});
+
+app.post('/api/bot/test', async (req, res) => {
+  try {
+    const token = (req.body?.token || localDb.getBotConfig().token || '').trim();
+    const result = await testTelegramToken(token);
+    if (result.success && result.bot) {
+      localDb.updateBotConfig({
+        token,
+        username: result.bot.username ? `@${result.bot.username}` : '',
+        name: result.bot.first_name || '',
+        botActive: true,
+        lastTestedAt: new Date().toISOString(),
+      });
+    }
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/bot/test-channel', async (req, res) => {
+  try {
+    const botConfig = localDb.getBotConfig();
+    const token = (req.body?.token || botConfig.token || '').trim();
+    const channel = (req.body?.channel || botConfig.targetChannel || '').trim();
+    const result = await sendChannelTestMessage(token, channel);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/bot/publish-track', async (req, res) => {
+  try {
+    const { trackId, track, customCaption } = req.body || {};
+    const targetTrack: DbTrack | undefined =
+      track ||
+      localDb.getTracks().find((t) => t.id === trackId) ||
+      localDb.getPendingQueue().find((t) => t.id === trackId);
+
+    if (!targetTrack) {
+      return res.status(400).json({ success: false, error: 'اطلاعات قطعه جهت ارسال به تلگرام یافت نشد.' });
+    }
+
+    const botConfig = localDb.getBotConfig();
+    const result = await publishTrackToTelegramChannel(targetTrack, botConfig, customCaption);
+    if (result.success) {
+      localDb.addLog({
+        id: `log-${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString('fa-IR'),
+        channel: 'کانال تلگرام',
+        message: `قطعه «${targetTrack.title}» با موفقیت در کانال ${botConfig.targetChannel} ارسال شد.`,
+        level: 'success',
+      });
+    }
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 7. Database Export & Reset
+app.get('/api/db/export', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', 'attachment; filename="madahi_backup_database.json"');
+  res.send(localDb.exportJson());
+});
+
+app.post('/api/db/reset', (req, res) => {
+  const fresh = localDb.resetToDefault();
+  res.json({ success: true, message: 'دیتابیس به مقادیر پیش‌فرض اولیه بازگردانده شد.', data: fresh });
+});
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static('dist'));
   app.get('*', (req, res) => {
