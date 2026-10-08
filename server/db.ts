@@ -342,6 +342,29 @@ const DEFAULT_TRACKS: Track[] = [
 
 const DEFAULT_PENDING_QUEUE: Track[] = [
   {
+    id: 'queue-yt-1',
+    title: 'شور طوفانی: حیدر حیدر اول و آخر حیدر (کیفیت استودیویی ۳۲۰)',
+    reciterId: 'rec-karimi',
+    reciterName: 'حاج محمود کریمی',
+    categoryId: 'cat-moharram',
+    categoryName: 'محرم و عاشورا',
+    occasion: 'شب بیست و یکم ماه رمضان',
+    duration: 380,
+    audioUrl: 'https://cdn.islamic.network/quran/audio/128/ar.alafasy/112.mp3',
+    coverUrl: '',
+    fileSizeMb: 8.7,
+    bitrate: '320 kbps',
+    status: 'pending',
+    sourceType: 'youtube',
+    sourceChannelName: 'پایگاه فطرس (@Fotros_ir)',
+    sourceUrl: 'https://youtube.com/watch?v=sample_karimi_yt',
+    playCount: 0,
+    createdAt: 'همین الان (پایش خودکار یوتیوب)',
+    s3Key: 'incoming/youtube/fotros_haidar_320.mp3',
+    tags: ['محمود کریمی', 'یوتیوب', 'شور', 'رمضان'],
+    lyrics: [],
+  },
+  {
     id: 'queue-1',
     title: 'شور حماسی: ای اهل حرم میر و علمدار نیامد',
     reciterId: 'rec-taheri',
@@ -612,7 +635,20 @@ class LocalDatabase {
   }
 
   public approveQueueItem(id: string, overrides?: Partial<Track>): Track | null {
-    const itemIdx = this.db.pendingQueue.findIndex((q) => q.id === id);
+    // Try by exact ID
+    let itemIdx = this.db.pendingQueue.findIndex((q) => q.id === id);
+
+    // Fallback: search by partial ID, sourceUrl, or s3Key
+    if (itemIdx === -1 && id) {
+      itemIdx = this.db.pendingQueue.findIndex(
+        (q) =>
+          q.id.includes(id) ||
+          id.includes(q.id) ||
+          (q.sourceUrl && id.includes(q.sourceUrl)) ||
+          (q.s3Key && id.includes(q.s3Key))
+      );
+    }
+
     if (itemIdx === -1) return null;
 
     const [item] = this.db.pendingQueue.splice(itemIdx, 1);
@@ -623,6 +659,8 @@ class LocalDatabase {
       createdAt: overrides?.createdAt || new Date().toLocaleDateString('fa-IR'),
     };
 
+    // Remove any existing duplicate in tracks before adding
+    this.db.tracks = this.db.tracks.filter((t) => t.id !== approvedTrack.id && t.s3Key !== approvedTrack.s3Key);
     this.db.tracks.unshift(approvedTrack);
     this.updateReciterAndCategoryCount(approvedTrack.reciterId, approvedTrack.categoryId, +1);
 
@@ -631,6 +669,65 @@ class LocalDatabase {
       timestamp: new Date().toLocaleTimeString('fa-IR'),
       channel: 'پنل مدیریت',
       message: `قطعه «${approvedTrack.title}» با موفقیت تأیید و به فهرست اصلی افزوده شد.`,
+      level: 'success',
+    });
+
+    this.saveToDisk(this.db);
+    return approvedTrack;
+  }
+
+  public approveQueueItemWithFallback(
+    id: string,
+    overrides?: Partial<Track>,
+    payloadTrack?: Partial<Track>
+  ): Track {
+    const existing = this.approveQueueItem(id, overrides);
+    if (existing) return existing;
+
+    // Fallback when item was not in server queue (e.g. client-only queue item)
+    const fallbackId = payloadTrack?.id || id || `track-${Date.now()}`;
+    const defaultRec = this.db.reciters[0];
+    const defaultCat = this.db.categories[1] || this.db.categories[0];
+
+    const approvedTrack: Track = {
+      id: fallbackId,
+      title: overrides?.title || payloadTrack?.title || 'نوای تایید شده',
+      reciterId: overrides?.reciterId || payloadTrack?.reciterId || defaultRec?.id || 'rec-karimi',
+      reciterName: overrides?.reciterName || payloadTrack?.reciterName || defaultRec?.name || 'مداح منتخب',
+      categoryId: overrides?.categoryId || payloadTrack?.categoryId || defaultCat?.id || 'cat-moharram',
+      categoryName: overrides?.categoryName || payloadTrack?.categoryName || defaultCat?.name || 'محرم و عاشورا',
+      occasion: overrides?.occasion || payloadTrack?.occasion || 'مداحی و مراثی',
+      duration: overrides?.duration || payloadTrack?.duration || 240,
+      audioUrl: overrides?.audioUrl || payloadTrack?.audioUrl || '',
+      coverUrl: overrides?.coverUrl || payloadTrack?.coverUrl || '',
+      fileSizeMb: overrides?.fileSizeMb || payloadTrack?.fileSizeMb || 5.0,
+      bitrate: overrides?.bitrate || payloadTrack?.bitrate || '320 kbps',
+      status: 'approved',
+      sourceType: payloadTrack?.sourceType || 'youtube',
+      sourceUrl: payloadTrack?.sourceUrl || '',
+      sourceChannelName: payloadTrack?.sourceChannelName || '',
+      playCount: 0,
+      createdAt: overrides?.createdAt || new Date().toLocaleDateString('fa-IR'),
+      s3Key: overrides?.s3Key || payloadTrack?.s3Key || `audio/${Date.now()}.mp3`,
+      tags: overrides?.tags || payloadTrack?.tags || ['مداحی'],
+      lyrics: overrides?.lyrics || payloadTrack?.lyrics || [],
+    };
+
+    // Remove from pendingQueue if any matching item exists
+    this.deleteQueueItem(id);
+    if (payloadTrack?.id && payloadTrack.id !== id) {
+      this.deleteQueueItem(payloadTrack.id);
+    }
+
+    this.db.tracks = this.db.tracks.filter((t) => t.id !== approvedTrack.id);
+    this.db.tracks.unshift(approvedTrack);
+    this.updateReciterAndCategoryCount(approvedTrack.reciterId, approvedTrack.categoryId, +1);
+
+    this.addLog({
+      id: `log-${Date.now()}`,
+      timestamp: new Date().toLocaleTimeString('fa-IR'),
+      channel: 'پنل مدیریت',
+      message: `قطعه «${approvedTrack.title}» با موفقیت در پایگاه داده ذخیره و تایید شد.`,
       level: 'success',
     });
 

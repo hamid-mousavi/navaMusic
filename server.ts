@@ -702,6 +702,25 @@ app.post('/api/media-info', async (req, res) => {
         console.warn('[MediaInfo] oEmbed fallback notice:', oeErr);
       }
 
+      // Check if this video is already in database tracks or pending queue
+      const existingTracks = localDb.getTracks();
+      const existingQueue = localDb.getPendingQueue();
+      const matchTrack = existingTracks.find(
+        (t) => (t.sourceUrl && t.sourceUrl.includes(videoId)) || t.id.includes(videoId) || (t.s3Key && t.s3Key.includes(videoId))
+      );
+      const matchQueue = existingQueue.find(
+        (q) => (q.sourceUrl && q.sourceUrl.includes(videoId)) || q.id.includes(videoId) || (q.s3Key && q.s3Key.includes(videoId))
+      );
+
+      // Guess matching reciter from author name if available
+      const allReciters = localDb.getReciters();
+      const matchedReciter = allReciters.find((r) => {
+        const n = r.name.toLowerCase();
+        const t = r.title.toLowerCase();
+        const text = `${title} ${author}`.toLowerCase();
+        return text.includes(n) || text.includes(t);
+      });
+
       return res.json({
         success: true,
         sourceType: 'youtube',
@@ -713,6 +732,11 @@ app.post('/api/media-info', async (req, res) => {
         embedUrl,
         playbackUrl,
         duration: 240,
+        isDuplicate: Boolean(matchTrack || matchQueue),
+        duplicateLocation: matchTrack ? 'database' : matchQueue ? 'queue' : null,
+        existingItem: matchTrack || matchQueue || null,
+        suggestedReciterId: matchedReciter?.id,
+        suggestedReciterName: matchedReciter?.name,
       });
     }
 
@@ -756,6 +780,20 @@ app.post('/api/media-info', async (req, res) => {
   }
 });
 
+// 5.5. Fast YouTube Channel Inspector & Reciter Auto-Detector
+app.post('/api/youtube/inspect-channel', async (req, res) => {
+  try {
+    const { target } = req.body;
+    if (!target || !String(target).trim()) {
+      return res.status(400).json({ error: 'آدرس یا هندل کانال ارسال نشده است.' });
+    }
+    const info = await youtubeMonitor.inspectChannel(String(target).trim());
+    res.json({ success: true, ...info });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'خطا در استعلام مشخصات کانال' });
+  }
+});
+
 // 6. Scan a specific channel immediately (discovers and lists videos)
 app.post('/api/youtube/channels/:id/scan', async (req, res) => {
   try {
@@ -795,7 +833,7 @@ app.post('/api/youtube/monitor/toggle', (req, res) => {
 });
 
 // API: Real Upload to ArvanCloud S3
-app.post('/api/upload', upload.single('file'), async (req, res) => {
+app.post('/api/upload', upload.single('file') as any, async (req, res) => {
   try {
     const file = req.file;
     if (!file) {
@@ -910,6 +948,23 @@ app.post('/api/extract-url', async (req, res) => {
         error:
           'اتصال به ابر آروان برقرار نیست. ابتدا کلیدهای استوریج ابر آروان را در بخش «تنظیمات ابر آروان» ذخیره کنید.',
       });
+    }
+
+    // Check for existing duplicate by YouTube ID unless force is requested
+    const ytMatch = cleanUrl.match(
+      /(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/))([\w-]{11})/i
+    );
+    if (ytMatch && !req.body.force) {
+      const vidId = ytMatch[1];
+      const matchTrack = localDb.getTracks().find((t) => t.sourceUrl?.includes(vidId) || t.id.includes(vidId) || t.s3Key?.includes(vidId));
+      const matchQueue = localDb.getPendingQueue().find((q) => q.sourceUrl?.includes(vidId) || q.id.includes(vidId) || q.s3Key?.includes(vidId));
+      if (matchTrack || matchQueue) {
+        return res.status(409).json({
+          isDuplicate: true,
+          error: `این ویدیو قبلاً پردازش شده است (${matchTrack ? 'در دیتابیس قطعات منتشر شده' : 'در صف بررسی موجود است'}). جهت دانلود و استخراج مجدد، گزینه «تأیید مجدد» را انتخاب کنید.`,
+          existingItem: matchTrack || matchQueue,
+        });
+      }
     }
 
     const isDirectAudio = cleanUrl.match(/\.(mp3|m4a|ogg|wav|aac|flac)($|\?)/i);
@@ -1338,8 +1393,9 @@ app.delete('/api/queue/:id', (req, res) => {
 
 app.post('/api/queue/:id/approve', async (req, res) => {
   try {
-    const { overrides, publishToTelegram } = req.body || {};
-    const approved = localDb.approveQueueItem(req.params.id, overrides);
+    const { overrides, publishToTelegram, track: payloadTrack } = req.body || {};
+    const approved = localDb.approveQueueItemWithFallback(req.params.id, overrides, payloadTrack);
+
     if (!approved) {
       return res.status(404).json({ error: 'آیتم مورد نظر در صف یافت نشد.' });
     }
@@ -1348,15 +1404,20 @@ app.post('/api/queue/:id/approve', async (req, res) => {
     const botConfig = localDb.getBotConfig();
     if (publishToTelegram || botConfig.autoPublishApproved) {
       if (botConfig.token && botConfig.targetChannel) {
-        telegramResult = await publishTrackToTelegramChannel(approved, botConfig);
-        if (telegramResult.success) {
-          localDb.addLog({
-            id: `log-${Date.now()}`,
-            timestamp: new Date().toLocaleTimeString('fa-IR'),
-            channel: 'کانال تلگرام',
-            message: `قطعه «${approved.title}» همزمان با تأیید، در کانال منتشر گردید.`,
-            level: 'success',
-          });
+        try {
+          telegramResult = await publishTrackToTelegramChannel(approved, botConfig);
+          if (telegramResult.success) {
+            localDb.addLog({
+              id: `log-${Date.now()}`,
+              timestamp: new Date().toLocaleTimeString('fa-IR'),
+              channel: 'کانال تلگرام',
+              message: `قطعه «${approved.title}» همزمان با تأیید، در کانال منتشر گردید.`,
+              level: 'success',
+            });
+          }
+        } catch (tgErr: any) {
+          console.warn('[TelegramPublish] Non-fatal error during approval publish:', tgErr);
+          telegramResult = { success: false, error: tgErr.message || 'خطا در ارسال به کانال تلگرام' };
         }
       }
     }
@@ -1365,9 +1426,10 @@ app.post('/api/queue/:id/approve', async (req, res) => {
       success: true,
       track: approved,
       telegram: telegramResult,
-      message: 'قطعه با موفقیت تأیید و به فهرست اصلی منتقل شد.',
+      message: 'قطعه با موفقیت تأیید و در پایگاه داده ذخیره شد.',
     });
   } catch (err: any) {
+    console.error('Approve Error:', err);
     res.status(500).json({ error: 'خطا در تأیید قطعه: ' + err.message });
   }
 });

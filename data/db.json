@@ -1,7 +1,32 @@
 {
   "version": 1,
-  "lastUpdated": "2026-10-08T12:18:50.940Z",
+  "lastUpdated": "2026-10-08T20:49:45.002Z",
   "tracks": [
+    {
+      "id": "queue-1791490172250",
+      "title": "يا يمة محسن | الملا ذوالفقار الكعبي - الليالي الفاطمية",
+      "reciterId": "rec-karimi",
+      "reciterName": "محمود کریمی",
+      "categoryId": "cat-ziyarat",
+      "categoryName": "ادعیه و زیارات",
+      "duration": 678,
+      "audioUrl": "https://s3.ir-central1.arvanstorage.ir/madahi-media-vault/incoming/youtube/1791490168430_يا_يمة_محسن___الملا_ذوالفقار_الكعبي_-_الليالي.mp3",
+      "coverUrl": "https://s3.ir-central1.arvanstorage.ir/madahi-media-vault/incoming/covers/1791490171528_cover.webp",
+      "fileSizeMb": 25.86,
+      "bitrate": "320kbps",
+      "lyrics": [],
+      "status": "approved",
+      "sourceType": "youtube",
+      "sourceUrl": "https://www.youtube.com/watch?v=tsO1u-D0x38",
+      "sourceChannelName": "ذوالفقار الكعبي / Tho alfakar Al kaaby",
+      "playCount": 0,
+      "createdAt": "۱۴۰۵/۷/۱۶",
+      "s3Key": "incoming/youtube/1791490168430_يا_يمة_محسن___الملا_ذوالفقار_الكعبي_-_الليالي.mp3",
+      "tags": [
+        "یوتیوب",
+        "محمود کریمی"
+      ]
+    },
     {
       "id": "track-1",
       "title": "زیارت عاشورا (قرائت کامل و فراز به فراز)",
@@ -91,7 +116,7 @@
       "title": "حاج محمود کریمی",
       "bio": "از برجسته‌ترین و نام‌آشناترین مداحان اهل بیت (ع) با اجراهای ماندگار در هیئت رایه العباس (ع).",
       "avatarUrl": "",
-      "tracksCount": 8,
+      "tracksCount": 9,
       "style": "شور، زمینه و روضه اصیل",
       "accentColor": "#10b981"
     },
@@ -162,7 +187,7 @@
       "name": "همه آثار",
       "slug": "all",
       "iconName": "Sparkles",
-      "tracksCount": 24,
+      "tracksCount": 25,
       "description": "تمامی نواها و قطعات صوتی مذهبی"
     },
     {
@@ -170,7 +195,7 @@
       "name": "ادعیه و زیارات",
       "slug": "ziyarat",
       "iconName": "BookOpen",
-      "tracksCount": 12,
+      "tracksCount": 13,
       "description": "زیارت عاشورا، دعای توسل، دعای کمیل، عهد و ندبه"
     },
     {
@@ -242,6 +267,18 @@
       "defaultReciterId": "rec-karimi",
       "defaultCategoryId": "cat-moharram",
       "autoApprove": false
+    },
+    {
+      "id": "yt-1791490060908",
+      "channelName": "ذوالفقار الکعبی",
+      "channelHandle": "@thoalfakaralkaaby",
+      "channelUrl": "https://youtube.com/@thoalfakaralkaaby",
+      "isMonitored": true,
+      "lastCheckedAt": "همین الان",
+      "totalExtracted": 0,
+      "defaultReciterId": "rec-samavati",
+      "defaultCategoryId": "cat-moharram",
+      "autoApprove": false
     }
   ],
   "telegramSources": [
@@ -289,6 +326,34 @@
     "lastTestedAt": null
   },
   "logs": [
+    {
+      "id": "log-1791492579676",
+      "timestamp": "۲۰:۴۹:۳۹",
+      "channel": "پنل مدیریت",
+      "message": "قطعه «شور ویژه تستی» با موفقیت در پایگاه داده ذخیره و تایید شد.",
+      "level": "success"
+    },
+    {
+      "id": "log-1791491765222",
+      "timestamp": "۲۰:۳۶:۰۵",
+      "channel": "پنل مدیریت",
+      "message": "قطعه «يا يمة محسن | الملا ذوالفقار الكعبي - الليالي الفاطمية» با موفقیت تأیید و به فهرست اصلی افزوده شد.",
+      "level": "success"
+    },
+    {
+      "id": "log-1791490172251",
+      "timestamp": "۲۰:۰۹:۳۲",
+      "channel": "یوتیوب استودیو",
+      "message": "صوت «يا يمة محسن | الملا ذوالفقار الكعبي - الليالي الفاطمية» از یوتیوب استخراج، در استوریج ذخیره و در صف بررسی ثبت شد.",
+      "level": "success"
+    },
+    {
+      "id": "log-1791490060908",
+      "timestamp": "۲۰:۰۷:۴۰",
+      "channel": "پایش یوتیوب",
+      "message": "کانال جدید «ذوالفقار الکعبی» برای پایش خودکار ثبت شد.",
+      "level": "success"
+    },
     {
       "id": "log-1791461930940",
       "timestamp": "۱۲:۱۸:۵۰",
@@ -397,6 +462,7 @@
   ],
   "stats": {
     "totalPlays": 51840,
-    "totalExtractions": 3
-  }
+    "totalExtractions": 4
+  },
+  "discoveredVideos": []
 }

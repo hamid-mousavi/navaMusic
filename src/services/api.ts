@@ -94,12 +94,13 @@ export const api = {
   async approveQueueItem(
     id: string,
     overrides?: Partial<Track>,
-    publishToTelegram?: boolean
+    publishToTelegram?: boolean,
+    track?: Track
   ): Promise<{ track: Track; telegram?: any; message: string }> {
     const res = await fetch(`/api/queue/${id}/approve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ overrides, publishToTelegram }),
+      body: JSON.stringify({ overrides, publishToTelegram, track }),
     });
     const data = await res.json();
     if (!data.success) throw new Error(data.error || 'خطا در تأیید آیتم');
@@ -284,6 +285,34 @@ export const api = {
     return data.videos || [];
   },
 
+  async inspectChannel(target: string): Promise<{
+    channelName: string;
+    channelHandle: string;
+    channelUrl: string;
+    suggestedReciterId?: string;
+    suggestedReciterName?: string;
+  }> {
+    const res = await fetch('/api/youtube/inspect-channel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target }),
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || 'خطا در استعلام مشخصات کانال');
+    return data;
+  },
+
+  async getMediaInfo(url: string): Promise<any> {
+    const res = await fetch('/api/media-info', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || 'خطا در دریافت اطلاعات رسانه');
+    return data;
+  },
+
   async scanSingleYoutubeChannel(id: string): Promise<any> {
     const res = await fetch(`/api/youtube/channels/${id}/scan`, { method: 'POST' });
     const data = await res.json();
@@ -344,17 +373,6 @@ export const api = {
       body: JSON.stringify(params),
     });
     const data = await res.json();
-    return data;
-  },
-
-  async getMediaInfo(url: string): Promise<any> {
-    const res = await fetch('/api/media-info', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
-    });
-    const data = await res.json();
-    if (!data.success) throw new Error(data.error || 'خطا در دریافت اطلاعات ویدیو');
     return data;
   },
 };

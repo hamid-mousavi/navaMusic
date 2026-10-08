@@ -39,6 +39,7 @@ import {
   Bot,
   MessageSquare,
   RotateCcw,
+  Settings,
 } from 'lucide-react';
 import {
   Track,
@@ -102,7 +103,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const { playTrack, currentTrack, isPlaying, togglePlay } = usePlayer();
 
   const [activeAdminTab, setActiveAdminTab] = useState<
-    'queue' | 'youtube_studio' | 'upload' | 'cloud_sync' | 'reciters' | 'categories' | 'telegram' | 'scripts'
+    'queue' | 'youtube_studio' | 'upload' | 'cloud_sync' | 'reciters' | 'categories' | 'telegram' | 'scripts' | 'settings'
   >('queue');
 
   // Telegram Bot states
@@ -156,6 +157,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [ytProcessProgress, setYtProcessProgress] = useState<number>(0);
   const [ytErrorMessage, setYtErrorMessage] = useState<string | null>(null);
   const [ytSuccessMessage, setYtSuccessMessage] = useState<string | null>(null);
+
+  // YouTube Media Inspection state (Step 1: Inspect info & preview before S3 upload)
+  const [isInspectingMedia, setIsInspectingMedia] = useState(false);
+  const [inspectedMedia, setInspectedMedia] = useState<{
+    id: string;
+    sourceType?: string;
+    title: string;
+    uploader: string;
+    authorUrl?: string;
+    thumbnail?: string;
+    embedUrl?: string | null;
+    playbackUrl: string;
+    duration: number;
+    isDuplicate?: boolean;
+    duplicateLocation?: 'database' | 'queue' | null;
+    existingItem?: any;
+    suggestedReciterId?: string;
+  } | null>(null);
+  const [showMediaPreviewPlayer, setShowMediaPreviewPlayer] = useState(false);
+
+  // Auto-channel inspect & Quick reciter add states
+  const [isInspectingChannel, setIsInspectingChannel] = useState(false);
+  const [suggestedCandidateReciter, setSuggestedCandidateReciter] = useState<{ id?: string; name: string } | null>(null);
+  const [showQuickAddReciterModal, setShowQuickAddReciterModal] = useState(false);
+  const [quickReciterName, setQuickReciterName] = useState('');
+  const [quickReciterTarget, setQuickReciterTarget] = useState<'instant' | 'channel'>('channel');
 
   // YouTube Cookies State & Management
   const [ytCookiesStatus, setYtCookiesStatus] = useState<{
@@ -545,9 +572,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const handleApproveTrack = async (track: Track, publishToTelegram: boolean = false) => {
     setApprovingTrackId(track.id);
     try {
-      const res = await api.approveQueueItem(track.id, undefined, publishToTelegram);
+      const res = await api.approveQueueItem(track.id, undefined, publishToTelegram, track);
       setTracks((prev) => [res.track, ...prev.filter((t) => t.id !== track.id)]);
       setPendingQueue((prev) => prev.filter((t) => t.id !== track.id));
+      if (onDbRefresh) {
+        onDbRefresh();
+      }
 
       let msg = `قطعه «${track.title}» تایید و در دیتابیس ثبت شد.`;
       if (publishToTelegram) {
@@ -943,37 +973,38 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     try {
       const res = await api.scanSingleYoutubeChannel(channel.id);
       const newTracks = res?.extractedTracks || [];
+      const duplicatesSkipped = res?.duplicatesSkipped || 0;
       const errors = res?.errors || [];
 
+      // Refresh DB queue so any background items are in sync
+      const dbAll = await api.getFullDatabase();
+      if (dbAll?.pendingQueue) setPendingQueue(dbAll.pendingQueue);
+      if (dbAll?.youtubeChannels) setYoutubeChannels(dbAll.youtubeChannels);
+
       if (newTracks.length > 0) {
-        setPendingQueue((prev) => [...newTracks, ...prev]);
-        setYoutubeChannels((prev) =>
-          prev.map((c) =>
-            c.id === channel.id
-              ? {
-                  ...c,
-                  totalExtracted: c.totalExtracted + newTracks.length,
-                  lastCheckedAt: 'همین الان',
-                }
-              : c
-          )
-        );
         setYtScanNotification({
           type: 'success',
-          message: `پایش موفق! ${toPersianDigits(newTracks.length)} قطعه صوتی جدید از «${channel.channelName}» استخراج و به صف بررسی افزوده شد.`,
+          message: `پایش موفق! ${toPersianDigits(newTracks.length)} قطعه صوتی جدید از «${channel.channelName}» استخراج و به صف بررسی افزوده شد${
+            duplicatesSkipped > 0 ? ` (${toPersianDigits(duplicatesSkipped)} اثر تکراری رد شد)` : ''
+          }.`,
+        });
+      } else if (duplicatesSkipped > 0) {
+        setYtScanNotification({
+          type: 'info',
+          message: `پایش کانال «${channel.channelName}» انجام شد: ${toPersianDigits(duplicatesSkipped)} ویدیوی بررسی شده تکراری بودند و رد شدند (قبلاً در پایگاه داده یا صف بررسی ثبت شده‌اند).`,
         });
       } else if (errors.length > 0) {
         const isBotBlock = errors.some((e: string) => e.includes('bot') || e.includes('Sign in'));
         setYtScanNotification({
           type: 'error',
           message: isBotBlock
-            ? `ویدیوهای جدید در کانال «${channel.channelName}» پیدا شد اما یوتیوب دانلود فایل را به دلیل نیاز به تایید هویت مسدود کرد. لطفاً کوکی‌های یوتیوب را در بخش «مدیریت کوکی‌ها» به‌روزرسانی کنید.`
+            ? `ویدیوهای جدید در کانال «${channel.channelName}» پیدا شد اما یوتیوب دانلود فایل را به دلیل نیاز به تایید هویت مسدود کرد. لطفاً کوکی‌های یوتیوب را در بخش «تنظیمات و کوکی‌ها» به‌روزرسانی کنید.`
             : `خطا در دریافت ویدیوها: ${errors[0]?.slice(0, 100)}`,
         });
       } else {
         setYtScanNotification({
           type: 'info',
-          message: `پایش کانال «${channel.channelName}» انجام شد. ویدیوی جدیدی که قبلاً استخراج نشده باشد یافت نشد.`,
+          message: `پایش کانال «${channel.channelName}» انجام شد. ویدیوی جدیدی در کانال یافت نشد.`,
         });
       }
       setTimeout(() => setYtScanNotification(null), 8000);
@@ -993,11 +1024,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setIsScanningAllYt(true);
     setYtScanNotification({
       type: 'info',
-      message: 'شروع پایش زنده تمام کانال‌های فعال یوتیوب و دانلود ویدیوهای جدید...',
+      message: 'شروع پایش زنده تمام کانال‌های فعال یوتیوب و بررسی ویدیوهای جدید...',
     });
     try {
       const summary = await api.scanAllYoutubeChannels();
       const count = summary?.newTracksAdded || 0;
+      const duplicates = summary?.totalDuplicatesSkipped || 0;
       // Refresh DB queue
       const dbAll = await api.getFullDatabase();
       if (dbAll?.pendingQueue) {
@@ -1008,7 +1040,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       }
       setYtScanNotification({
         type: 'success',
-        message: `پایش کامل به پایان رسید: ${toPersianDigits(summary?.channelsScanned || 0)} کانال بررسی شد و ${toPersianDigits(count)} صوت جدید به صف بررسی اضافه گردید.`,
+        message: `پایش کامل به پایان رسید: ${toPersianDigits(summary?.channelsScanned || 0)} کانال بررسی شد و ${toPersianDigits(count)} صوت جدید به صف بررسی اضافه گردید${
+          duplicates > 0 ? ` (${toPersianDigits(duplicates)} ویدیوی تکراری نادیده گرفته شد)` : ''
+        }.`,
       });
       setTimeout(() => setYtScanNotification(null), 7000);
     } catch (err: any) {
@@ -1035,11 +1069,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     return clean;
   };
 
-  // Handler for Single Instant YouTube/Web URL Extraction (Real backend conversion and ArvanCloud S3 upload)
-  const handleExtractFromYouTubeOrWeb = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-
-    const normalizedUrl = normalizeMediaUrl(ytInputUrl);
+  // Step 1: Inspect Media Info & Preview before Sending to Cloud
+  const handleInspectMedia = async (urlToInspect?: string) => {
+    const rawUrl = urlToInspect || ytInputUrl;
+    const normalizedUrl = normalizeMediaUrl(rawUrl);
     if (!normalizedUrl) {
       setYtErrorMessage('لطفاً آدرس لینک یوتیوب، آپارات یا فایل مستقیم را در کادر بالا وارد کنید.');
       const el = document.getElementById('yt-url-input');
@@ -1047,31 +1080,57 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       return;
     }
 
+    setIsInspectingMedia(true);
+    setYtErrorMessage(null);
+    setYtSuccessMessage(null);
+    setYtInputUrl(normalizedUrl);
+
+    try {
+      const data = await api.getMediaInfo(normalizedUrl);
+      if (data && data.success) {
+        setInspectedMedia(data);
+        setYtCustomTitle(data.title || '');
+        if (data.suggestedReciterId) {
+          setYtReciterId(data.suggestedReciterId);
+        }
+      } else {
+        throw new Error(data?.error || 'امکان دریافت اطلاعات از این لینک وجود ندارد.');
+      }
+    } catch (err: any) {
+      setYtErrorMessage(`خطا در استعلام اطلاعات ویدیو: ${err.message}`);
+    } finally {
+      setIsInspectingMedia(false);
+    }
+  };
+
+  // Step 2: Confirm, Convert with FFmpeg/yt-dlp, Upload to ArvanCloud S3 & Push to Queue
+  const handleConfirmExtractToCloud = async (force: boolean = false) => {
+    const targetUrl = inspectedMedia?.playbackUrl || normalizeMediaUrl(ytInputUrl);
+    if (!targetUrl) return;
+
     if (isYtProcessing) return;
 
-    setYtInputUrl(normalizedUrl);
     setIsYtProcessing(true);
     setYtErrorMessage(null);
     setYtSuccessMessage(null);
-    setYtProcessProgress(12);
-    setYtProcessStep('ارتباط با سرور و آماده‌سازی موتور دریافت (yt-dlp)...');
+    setYtProcessProgress(15);
+    setYtProcessStep('اتصال به سرور و آماده‌سازی موتور استخراج (yt-dlp)...');
 
-    // Smooth progress simulation while backend downloads and converts
     const progressTimer = setInterval(() => {
       setYtProcessProgress((prev) => {
-        if (prev < 30) {
-          setYtProcessStep('دریافت اطلاعات متادیتا و دانلود استریم صوتی از یوتیوب...');
+        if (prev < 35) {
+          setYtProcessStep('دانلود استریم صوتی از یوتیوب با کیفیت اورجینال...');
           return prev + 8;
-        } else if (prev < 65) {
-          setYtProcessStep(`تبدیل استریم به فایل صوتی MP3 (${ytBitrate}kbps) با موتور FFmpeg...`);
+        } else if (prev < 70) {
+          setYtProcessStep(`تبدیل استریم به MP3 (${ytBitrate}kbps) با موتور FFmpeg...`);
           return prev + 10;
-        } else if (prev < 88) {
-          setYtProcessStep('ارسال مستقیم فایل صوتی تبدیل‌شده به باکت S3 ابر آروان...');
+        } else if (prev < 90) {
+          setYtProcessStep('ارسال مستقیم فایل صوتی به باکت S3 ابر آروان...');
           return prev + 4;
         }
         return prev;
       });
-    }, 1200);
+    }, 1100);
 
     try {
       const selectedRec = reciters.find((r) => r.id === ytReciterId) || reciters[0];
@@ -1081,56 +1140,61 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          url: normalizedUrl,
-          title: ytCustomTitle.trim(),
-          reciterName: selectedRec.name,
-          categoryId: selectedCat.id,
+          url: targetUrl,
+          title: ytCustomTitle.trim() || inspectedMedia?.title,
+          reciterId: selectedRec?.id,
+          reciterName: selectedRec?.name,
+          categoryId: selectedCat?.id,
           bitrate: ytBitrate,
+          force,
         }),
       });
 
       clearInterval(progressTimer);
-
       const data = await res.json();
 
       if (!res.ok || !data.success) {
+        if (res.status === 409 && data.isDuplicate) {
+          throw new Error(data.error || 'این ویدیو قبلاً استخراج شده است.');
+        }
         throw new Error(data.error || 'خطا در تبدیل و آپلود به ابر آروان');
       }
 
       setYtProcessProgress(100);
-      setYtProcessStep('با موفقیت انجام شد! ذخیره در باکت ابر آروان...');
+      setYtProcessStep('با موفقیت انجام شد! ذخیره در باکت ابر آروان و صف بررسی...');
 
       const generatedTitle =
-        data.title ||
-        (ytCustomTitle.trim() || `نوای صوتی استخراج شده از یوتیوب (${selectedRec.name})`);
+        data.title || ytCustomTitle.trim() || inspectedMedia?.title || `نوای صوتی (${selectedRec?.name})`;
 
-      const newTrack: Track = {
+      const newTrack: Track = data.queueItem || {
         id: `queue-yt-${Date.now()}`,
         title: generatedTitle,
-        reciterId: selectedRec.id,
-        reciterName: selectedRec.name,
-        categoryId: selectedCat.id,
-        categoryName: selectedCat.name,
+        reciterId: selectedRec?.id || 'rec-karimi',
+        reciterName: selectedRec?.name || 'مداح منتخب',
+        categoryId: selectedCat?.id || 'cat-moharram',
+        categoryName: selectedCat?.name || 'محرم و عاشورا',
         occasion: 'استخراج مستقیم از یوتیوب',
-        duration: data.duration || 210,
-        audioUrl: data.url, // Real ArvanCloud S3 public URL
-        coverUrl: data.coverUrl || '',
+        duration: data.duration || inspectedMedia?.duration || 210,
+        audioUrl: data.url,
+        coverUrl: data.coverUrl || inspectedMedia?.thumbnail || '',
         fileSizeMb: data.fileSizeMb || (ytBitrate === '320' ? 8.5 : 4.5),
         bitrate: `${ytBitrate} kbps`,
         status: 'pending',
         sourceType: 'youtube',
-        sourceUrl: ytInputUrl.trim(),
-        sourceChannelName: data.uploader || 'یوتیوب (استخراج مستقیم)',
+        sourceUrl: targetUrl,
+        sourceChannelName: data.uploader || inspectedMedia?.uploader || 'یوتیوب',
         playCount: 0,
         createdAt: 'همین الان (استودیو یوتیوب)',
         s3Key: data.s3Key || `incoming/youtube/${Date.now()}.mp3`,
-        tags: [selectedRec.name, 'یوتیوب', `${ytBitrate} kbps`, 'ابر آروان'],
+        tags: [selectedRec?.name || 'مداحی', 'یوتیوب', `${ytBitrate} kbps`, 'ابر آروان'],
         lyrics: [],
       };
 
-      setPendingQueue((prev) => [newTrack, ...prev]);
+      setPendingQueue((prev) => [newTrack, ...prev.filter((p) => p.id !== newTrack.id)]);
+      if (onDbRefresh) onDbRefresh();
+
       setYtSuccessMessage(
-        `صوت با موفقیت از «${data.uploader || 'یوتیوب'}» استخراج، به MP3 تبدیل و در باکت ابر آروان (${data.fileSizeMb} مگابایت) ذخیره شد!`
+        `صوت با موفقیت از «${data.uploader || inspectedMedia?.uploader || 'یوتیوب'}» استخراج، به MP3 تبدیل و در باکت ابر آروان (${data.fileSizeMb} مگابایت) ذخیره شد! به صف بررسی فایل‌ها افزوده شد.`
       );
       setLogs((prev) => [
         {
@@ -1143,6 +1207,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         ...prev,
       ]);
 
+      setInspectedMedia(null);
       setYtInputUrl('');
       setYtCustomTitle('');
       setTimeout(() => {
@@ -1150,37 +1215,76 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         setYtProcessStep('');
         setYtProcessProgress(0);
       }, 1500);
-
-      // Refresh real Arvan S3 files in admin
-      fetchSyncedFiles();
     } catch (err: any) {
       clearInterval(progressTimer);
       setIsYtProcessing(false);
       setYtProcessStep('');
-      setYtProcessProgress(0);
-      const errMsg = err.message || 'خطا در ارتباط با سرور یا پردازش ویدیو';
-      setYtErrorMessage(errMsg);
-      if (
-        errMsg.includes('کوکی') ||
-        errMsg.includes('تایید') ||
-        errMsg.includes('Sign in') ||
-        errMsg.includes('bot')
-      ) {
-        setShowCookiesManager(true);
-      }
-      setLogs((prev) => [
-        {
-          id: `log-${Date.now()}`,
-          timestamp: new Date().toLocaleTimeString('fa-IR'),
-          channel: 'یوتیوب استودیو',
-          message: `خطا در استخراج از یوتیوب: ${errMsg}`,
-          level: 'error',
-        },
-        ...prev,
-      ]);
+      setYtErrorMessage(err.message || 'خطا در فرآیند استخراج');
     }
   };
 
+  // Channel Info Auto-Inspector
+  const handleInspectChannelInfo = async () => {
+    const raw = newYtChannelHandle.trim() || newYtChannelName.trim();
+    if (!raw) {
+      alert('لطفاً ابتدا هندل یوتیوب (مانند Fotros_ir@ یا آدرس کانال) را وارد کنید.');
+      return;
+    }
+    setIsInspectingChannel(true);
+    try {
+      const data = await api.inspectChannel(raw);
+      if (data && data.channelName) {
+        setNewYtChannelName(data.channelName);
+        if (data.channelHandle) {
+          setNewYtChannelHandle(data.channelHandle);
+        }
+        if (data.suggestedReciterId) {
+          setNewYtChannelReciterId(data.suggestedReciterId);
+          setSuggestedCandidateReciter({ id: data.suggestedReciterId, name: data.suggestedReciterName || data.channelName });
+        } else if (data.suggestedReciterName) {
+          setSuggestedCandidateReciter({ name: data.suggestedReciterName });
+        }
+      }
+    } catch (err: any) {
+      console.warn('Channel inspection error:', err);
+    } finally {
+      setIsInspectingChannel(false);
+    }
+  };
+
+  // Quick Add Reciter inline
+  const handleQuickAddReciter = async () => {
+    if (!quickReciterName.trim()) return;
+    const newName = quickReciterName.trim();
+    const newRec: Reciter = {
+      id: `rec-${Date.now()}`,
+      name: newName,
+      title: newName.startsWith('حاج') || newName.startsWith('استاد') || newName.startsWith('کربلایی') ? newName : `حاج ${newName}`,
+      bio: 'از مداحان و ذاکرین اهل بیت (ع)',
+      avatarUrl: '',
+      tracksCount: 0,
+      style: 'نوحه و روضه',
+      accentColor: '#10b981',
+    };
+    try {
+      const saved = await api.addReciter(newRec);
+      setReciters((prev) => [...prev, saved]);
+      if (quickReciterTarget === 'channel') {
+        setNewYtChannelReciterId(saved.id);
+      } else {
+        setYtReciterId(saved.id);
+      }
+    } catch (_) {
+      setReciters((prev) => [...prev, newRec]);
+      if (quickReciterTarget === 'channel') {
+        setNewYtChannelReciterId(newRec.id);
+      } else {
+        setYtReciterId(newRec.id);
+      }
+    }
+    setQuickReciterName('');
+    setShowQuickAddReciterModal(false);
+  };
 
   // Run Telegram Scraper Simulation
   const handleTriggerScraper = () => {
@@ -1827,6 +1931,21 @@ USING (true);
           <Terminal className="w-4 h-4" />
           <span>اسکریپت‌های سرور</span>
         </button>
+
+        <button
+          onClick={() => setActiveAdminTab('settings')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-medium whitespace-nowrap transition-all border ${
+            activeAdminTab === 'settings'
+              ? 'bg-amber-500 text-slate-950 font-bold border-amber-400 shadow-sm'
+              : 'bg-slate-900 text-slate-400 hover:text-slate-200 border-slate-800'
+          }`}
+        >
+          <Settings className="w-4 h-4 text-amber-400" />
+          <span>تنظیمات و کوکی‌ها</span>
+          {ytCookiesStatus.configured && (
+            <span className="w-2 h-2 rounded-full bg-emerald-400" title="کوکی تنظیم شده"></span>
+          )}
+        </button>
       </div>
 
       {/* Tab 1: Review Queue (فایل‌های ارسال شده توسط ربات تلگرام) */}
@@ -2021,43 +2140,63 @@ USING (true);
                   استودیو دریافت خودکار مداحی و ادعیه از یوتیوب و وب
                 </h3>
                 <p className="text-xs text-slate-300 leading-relaxed">
-                  کانال‌های مدنظر خود در یوتیوب را ثبت کنید تا به محض انتشار ویدیوی جدید، صوت آن به صورت خودکار با کیفیت ۳۲۰ استخراج، به باکت ابر آروان فرستاده و در صف بررسی پنل ظاهر شود. همچنین می‌توانید هر لینک تکی یوتیوب یا وب را با یک کلیک تبدیل کنید.
+                  کانال‌های مدنظر خود را ثبت کنید تا جدیدترین قطعات به طور خودکار به صوت ۳۲۰ تبدیل و در باکت ابر آروان ذخیره شوند. همچنین لینک‌های تکی را ابتدا استعلام و پیش‌نمایش کرده و پس از تأیید به صف ارسال کنید.
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={handleScanAllChannelsNow}
-                disabled={isScanningAllYt || !!scanningChannelId}
-                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-lg shadow-rose-600/20 transition-all active:scale-95 shrink-0 disabled:opacity-50 cursor-pointer"
-                title="پایش فوری کلیه کانال‌های یوتیوب و استخراج جدیدترین قطعات به صف بررسی"
-              >
-                <RefreshCw className={`w-4 h-4 ${isScanningAllYt ? 'animate-spin' : ''}`} />
-                <span>{isScanningAllYt ? 'در حال پایش کانال‌ها...' : 'پایش و همگام‌سازی فوری کانال‌ها'}</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                {/* Compact Cookies Status & Settings Pill */}
+                <button
+                  type="button"
+                  onClick={() => setActiveAdminTab('settings')}
+                  className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-700/80 hover:border-slate-600 text-xs text-slate-200 transition-all cursor-pointer shadow-sm"
+                  title="مدیریت کوکی‌های حساب یوتیوب برای رفع محدودیت‌های ضدربات در تب تنظیمات"
+                >
+                  <Key className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span>کوکی یوتیوب:</span>
+                  {ytCookiesStatus.configured ? (
+                    <span className="text-emerald-400 font-bold">فعال ({toPersianDigits(ytCookiesStatus.entryCount)})</span>
+                  ) : (
+                    <span className="text-amber-400">تنظیم نشده</span>
+                  )}
+                  <span className="text-slate-500 text-[10px]">⚙️ تنظیمات</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleScanAllChannelsNow}
+                  disabled={isScanningAllYt || !!scanningChannelId}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-lg shadow-rose-600/20 transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
+                  title="پایش فوری کلیه کانال‌های یوتیوب و استخراج جدیدترین قطعات به صف بررسی"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isScanningAllYt ? 'animate-spin' : ''}`} />
+                  <span>{isScanningAllYt ? 'در حال پایش کانال‌ها...' : 'پایش و همگام‌سازی فوری همه کانال‌ها'}</span>
+                </button>
+              </div>
             </div>
           </div>
 
-          {/* Section 1: Instant Link Downloader & Converter */}
+          {/* Section 1: Two-Step Instant Link Inspector & Downloader */}
           <div className="bg-slate-900/90 rounded-2xl border border-slate-800 p-5 sm:p-6 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div className="flex items-center gap-2">
                 <ArrowDownToLine className="w-5 h-5 text-rose-400" />
                 <h4 className="text-sm font-bold text-slate-100">
-                  دریافت فوری از لینک یوتیوب یا فایل مستقیم وب
+                  دریافت فوری از لینک یوتیوب یا فایل مستقیم وب (استعلام و تأیید پیش از ارسال به ابر آروان)
                 </h4>
               </div>
               <span className="text-[11px] text-slate-400 font-mono">
-                موتور: yt-dlp + ffmpeg 320kbps
+                موتور: yt-dlp + FFmpeg 320kbps
               </span>
             </div>
 
-            <form onSubmit={handleExtractFromYouTubeOrWeb} noValidate className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                  آدرس ویدیوی یوتیوب، شورتز، آپارات یا لینک مستقیم فایل وب *
-                </label>
-                <div className="relative">
+            {/* URL Input Box */}
+            <div className="space-y-3">
+              <label className="block text-xs font-medium text-slate-300">
+                آدرس ویدیوی یوتیوب، شورتز، آپارات یا لینک مستقیم فایل وب *
+              </label>
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                <div className="relative flex-1">
                   <input
                     id="yt-url-input"
                     type="text"
@@ -2068,20 +2207,14 @@ USING (true);
                       if (ytErrorMessage) setYtErrorMessage(null);
                       if (ytSuccessMessage) setYtSuccessMessage(null);
                     }}
-                    onPaste={(e) => {
-                      const pasted = e.clipboardData.getData('text');
-                      if (pasted) {
-                        const cleaned = normalizeMediaUrl(pasted);
-                        if (cleaned) {
-                          e.preventDefault();
-                          setYtInputUrl(cleaned);
-                          if (ytErrorMessage) setYtErrorMessage(null);
-                          if (ytSuccessMessage) setYtSuccessMessage(null);
-                        }
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleInspectMedia();
                       }
                     }}
-                    placeholder="https://www.youtube.com/watch?v=... یا youtu.be/... یا aparat.com/... یا لینک فایل mp4/mp3"
-                    className="w-full pr-4 pl-28 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs sm:text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-rose-500 font-mono"
+                    placeholder="https://www.youtube.com/watch?v=... یا youtu.be/... یا aparat.com/... یا لینک مستقیم فایل"
+                    className="w-full pr-4 pl-24 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs sm:text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-rose-500 font-mono"
                   />
                   <button
                     type="button"
@@ -2092,335 +2225,352 @@ USING (true);
                           if (clipText && clipText.trim()) {
                             const cleaned = normalizeMediaUrl(clipText);
                             setYtInputUrl(cleaned);
-                            if (ytErrorMessage) setYtErrorMessage(null);
-                            if (ytSuccessMessage) setYtSuccessMessage(null);
+                            handleInspectMedia(cleaned);
                             return;
                           }
                         }
                       } catch (_) {}
-                      // Fallback: focus input so user can press Ctrl+V
                       const el = document.getElementById('yt-url-input');
-                      if (el) {
-                        el.focus();
-                      }
+                      if (el) el.focus();
                     }}
-                    className="absolute left-2 top-1/2 -translate-y-1/2 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg transition-colors"
+                    className="absolute left-2 top-1/2 -translate-y-1/2 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg transition-colors cursor-pointer"
                   >
-                    چسباندن (Paste)
+                    چسباندن
                   </button>
                 </div>
-              </div>
 
-              {/* Optional Custom Title */}
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                  عنوان دلخواه نوای صوتی (اختیاری - در صورت خالی ماندن، عنوان خود ویدیو از یوتیوب استخراج می‌شود)
-                </label>
-                <input
-                  type="text"
-                  value={ytCustomTitle}
-                  onChange={(e) => setYtCustomTitle(e.target.value)}
-                  placeholder="مثال: مناجات با امام زمان (عج) - شب جمعه"
-                  className="w-full px-4 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs sm:text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-rose-500"
-                />
-              </div>
-
-              {/* Settings row */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">
-                    کیفیت صوتی خروجی
-                  </label>
-                  <div className="flex items-center gap-2 bg-slate-950 p-1 rounded-xl border border-slate-800">
-                    <button
-                      type="button"
-                      onClick={() => setYtBitrate('320')}
-                      className={`flex-1 py-1 text-xs font-semibold rounded-lg transition-colors ${
-                        ytBitrate === '320'
-                          ? 'bg-rose-600 text-white'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      ۳۲۰ kbps (استودیویی)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setYtBitrate('128')}
-                      className={`flex-1 py-1 text-xs font-semibold rounded-lg transition-colors ${
-                        ytBitrate === '128'
-                          ? 'bg-rose-600 text-white'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      ۱۲۸ kbps (استاندارد)
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">
-                    مداح پیش‌فرض
-                  </label>
-                  <select
-                    value={ytReciterId}
-                    onChange={(e) => setYtReciterId(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs sm:text-sm text-slate-200 focus:outline-none focus:border-rose-500"
-                  >
-                    {reciters.map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.title}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">
-                    دسته‌بندی موضوعی
-                  </label>
-                  <select
-                    value={ytCategoryId}
-                    onChange={(e) => setYtCategoryId(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs sm:text-sm text-slate-200 focus:outline-none focus:border-rose-500"
-                  >
-                    {categories
-                      .filter((c) => c.slug !== 'all')
-                      .map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                  </select>
-                </div>
-              </div>
-
-              {/* Error Banner */}
-              {ytErrorMessage && (
-                <div className="p-4 bg-rose-950/80 border border-rose-500/50 rounded-xl text-xs text-rose-300 space-y-2">
-                  <div className="flex items-start gap-2.5">
-                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                    <div className="space-y-1 flex-1">
-                      <div className="font-bold text-rose-200">خطا در پردازش یا استخراج لینک:</div>
-                      <div className="text-slate-200 leading-relaxed">{ytErrorMessage}</div>
-                    </div>
-                  </div>
-                  {(ytErrorMessage.includes('تایید') ||
-                    ytErrorMessage.includes('کوکی') ||
-                    ytErrorMessage.includes('bot') ||
-                    ytErrorMessage.includes('Sign in')) && (
-                    <div className="pt-2 border-t border-rose-500/30 flex flex-wrap items-center justify-between gap-2">
-                      <span className="text-[11px] text-rose-300/90">
-                        💡 این خطا ناشی از سیستم ضدربات یوتیوب روی سرورهای ابری است و با وارد کردن کوکی حساب کاربری فوراً حل می‌شود.
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => setShowCookiesManager(true)}
-                        className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg font-bold text-xs flex items-center gap-1.5 transition-colors shadow"
-                      >
-                        <Key className="w-3.5 h-3.5" />
-                        <span>تنظیم سریع کوکی‌های یوتیوب</span>
-                      </button>
-                    </div>
+                <button
+                  type="button"
+                  onClick={() => handleInspectMedia()}
+                  disabled={isInspectingMedia || !ytInputUrl.trim()}
+                  className="px-5 py-2.5 bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-lg shadow-rose-600/20 transition-all flex items-center justify-center gap-2 cursor-pointer shrink-0"
+                >
+                  {isInspectingMedia ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>در حال استعلام...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Eye className="w-4 h-4" />
+                      <span>استعلام و دریافت اطلاعات ویدیو</span>
+                    </>
                   )}
-                </div>
-              )}
-
-              {/* Success Banner */}
-              {ytSuccessMessage && (
-                <div className="p-3.5 bg-emerald-950/80 border border-emerald-500/50 rounded-xl text-xs text-emerald-300 flex items-start gap-2.5">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                  <div className="space-y-1">
-                    <div className="font-bold text-emerald-200">استخراج و آپلود با موفقیت انجام شد:</div>
-                    <div className="text-slate-300">{ytSuccessMessage}</div>
-                    <div className="text-[11px] text-emerald-400/80 mt-1">
-                      می‌توانید هم‌اکنون این قطعه را در تب «صف رسانه‌ها» گوش دهید یا مستقیماً منتشر نمایید.
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Progress bar when converting */}
-              {isYtProcessing && (
-                <div className="p-4 bg-slate-950 rounded-xl border border-rose-500/40 space-y-2">
-                  <div className="flex items-center justify-between text-xs font-mono">
-                    <span className="text-rose-400 font-sans font-semibold flex items-center gap-2">
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      {ytProcessStep}
-                    </span>
-                    <span className="text-slate-300 tabular-nums">{toPersianDigits(ytProcessProgress)}%</span>
-                  </div>
-                  <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-l from-rose-500 to-amber-500 transition-all duration-300 rounded-full"
-                      style={{ width: `${ytProcessProgress}%` }}
-                    />
-                  </div>
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={isYtProcessing}
-                className={`w-full py-3 bg-gradient-to-l from-rose-600 to-rose-700 hover:from-rose-500 hover:to-rose-600 text-white font-bold text-xs sm:text-sm rounded-xl shadow-lg shadow-rose-600/20 transition-all flex items-center justify-center gap-2 ${
-                  isYtProcessing ? 'opacity-60 cursor-wait' : 'cursor-pointer active:scale-[0.99]'
-                }`}
-              >
-                <Youtube className="w-4 h-4" />
-                <span>
-                  {isYtProcessing
-                    ? 'در حال پردازش و آپلود به ابر آروان...'
-                    : 'شروع استخراج صوت، تبدیل به MP3 و ارسال به باکت ابر آروان'}
-                </span>
-              </button>
-            </form>
-          </div>
-
-          {/* YouTube Cookies & Anti-Bot Bypass Card */}
-          <div className="bg-slate-900/90 rounded-2xl border border-slate-800 overflow-hidden shadow-lg">
-            <div
-              onClick={() => setShowCookiesManager(!showCookiesManager)}
-              className="p-4 sm:p-5 flex items-center justify-between cursor-pointer hover:bg-slate-800/40 transition-colors"
-            >
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 shrink-0">
-                  <Key className="w-5 h-5" />
-                </div>
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h4 className="text-sm font-bold text-slate-100">
-                      مدیریت کوکی‌های یوتیوب (حل دائمی خطای نیاز به تایید و محدودیت‌های سرور ابری)
-                    </h4>
-                    {ytCookiesStatus.configured ? (
-                      ytCookiesStatus.hasLoginInfo ? (
-                        <span className="bg-emerald-500/10 text-emerald-400 text-[10px] px-2 py-0.5 rounded border border-emerald-500/20 font-bold flex items-center gap-1">
-                          <CheckCircle2 className="w-3 h-3" />
-                          کوکی ورود فعال ({toPersianDigits(ytCookiesStatus.entryCount)} رکورد - احراز هویت شده)
-                        </span>
-                      ) : (
-                        <span className="bg-amber-500/10 text-amber-300 text-[10px] px-2 py-0.5 rounded border border-amber-500/20 font-bold flex items-center gap-1" title="کوکی مهم LOGIN_INFO یافت نشد. لطفاً در حالت ورود به حساب گوگل/یوتیوب خروجی بگیرید.">
-                          <AlertTriangle className="w-3 h-3 text-amber-400" />
-                          کوکی ناقص ({toPersianDigits(ytCookiesStatus.entryCount)} رکورد - بدون LOGIN_INFO)
-                        </span>
-                      )
-                    ) : (
-                      <span className="bg-rose-500/10 text-rose-400 text-[10px] px-2 py-0.5 rounded border border-rose-500/20 font-bold">
-                        کوکی ثبت نشده
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    برای دور زدن خطای «Sign in to confirm you're not a bot» و باز کردن قفل دانلود تمام ویدیوهای یوتیوب در سرور
-                  </p>
-                </div>
+                </button>
               </div>
-
-              <button
-                type="button"
-                className="text-xs text-rose-400 hover:text-rose-300 font-bold flex items-center gap-1 shrink-0 px-2.5 py-1 bg-slate-800/60 rounded-lg border border-slate-700"
-              >
-                <span>{showCookiesManager ? 'بستن تنظیمات' : 'تنظیم و راهنما'}</span>
-              </button>
             </div>
 
-            {showCookiesManager && (
-              <div className="border-t border-slate-800 p-5 sm:p-6 space-y-5 bg-slate-950/40">
-                {/* How it works info */}
-                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5 text-xs text-slate-300 leading-relaxed">
-                  <div className="font-bold text-amber-300 flex items-center gap-2">
-                    <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
-                    <span>راهنمای ۳ مرحله‌ای استخراج و ثبت کوکی یوتیوب (در کمتر از ۱ دقیقه):</span>
+            {/* Error Banner */}
+            {ytErrorMessage && (
+              <div className="p-4 bg-rose-950/80 border border-rose-500/50 rounded-xl text-xs text-rose-300 space-y-2">
+                <div className="flex items-start gap-2.5">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <div className="space-y-1 flex-1">
+                    <div className="font-bold text-rose-200">پیام سرور:</div>
+                    <div className="text-slate-200 leading-relaxed">{ytErrorMessage}</div>
                   </div>
-                  <ol className="list-decimal list-inside space-y-2 text-slate-300 text-[11px] sm:text-xs pr-1">
-                    <li>
-                      یک افزونه ساده مدیریت کوکی مانند <span className="text-rose-400 font-mono font-bold">Get cookies.txt LOCALLY</span> یا <span className="text-rose-400 font-mono font-bold">Cookie-Editor</span> روی مرورگر خود (کروم یا فایرفاکس) نصب کنید.
-                    </li>
-                    <li>
-                      وارد سایت <span className="text-rose-400 font-mono font-bold">youtube.com</span> شوید، مطمئن شوید که <span className="text-amber-300 font-bold underline">به حساب کاربری گوگل/یوتیوب خود وارد شده‌اید (Sign in)</span>، سپس افزونه را باز کنید و گزینه <span className="text-emerald-400 font-mono font-bold">Export (یا Export Netscape)</span> را بزنید. (حاوی کوکی حیاتی <span className="text-emerald-400 font-mono">LOGIN_INFO</span>)
-                    </li>
-                    <li>
-                      متن کپی‌شده را در کادر زیر پیست کرده یا فایل <span className="font-mono text-slate-200">cookies.txt</span> را بارگذاری کنید و دکمه «ذخیره و فعال‌سازی کوکی» را بزنید.
-                    </li>
-                  </ol>
-                  <div className="pt-2 border-t border-slate-800/80 text-[11px] text-slate-400 flex items-center gap-1.5">
-                    <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                    <span>نکته: لینک‌های مستقیم فایل (مانند mp3. یا mp4.) و لینک‌های آپارات بدون نیاز به کوکی و بلافاصله استخراج می‌شوند.</span>
+                </div>
+                {(ytErrorMessage.includes('تایید') ||
+                  ytErrorMessage.includes('کوکی') ||
+                  ytErrorMessage.includes('bot') ||
+                  ytErrorMessage.includes('Sign in')) && (
+                  <div className="pt-2 border-t border-rose-500/30 flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] text-rose-300/90">
+                      💡 با ثبت کوکی حساب کاربری گوگل/یوتیوب، محدودیت ضدربات بلافاصله برطرف می‌گردد.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setActiveAdminTab('settings')}
+                      className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg font-bold text-xs flex items-center gap-1.5 transition-colors shadow"
+                    >
+                      <Key className="w-3.5 h-3.5" />
+                      <span>تنظیم کوکی‌های یوتیوب در تب تنظیمات</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Success Banner */}
+            {ytSuccessMessage && (
+              <div className="p-4 bg-emerald-950/80 border border-emerald-500/50 rounded-xl text-xs text-emerald-300 flex items-start justify-between gap-2.5">
+                <div className="flex items-start gap-2.5">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <div className="font-bold text-emerald-200">تبدیل و آپلود با موفقیت انجام شد:</div>
+                    <div className="text-slate-300">{ytSuccessMessage}</div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveAdminTab('queue')}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs rounded-lg shrink-0 transition-colors"
+                >
+                  مشاهده در صف بررسی
+                </button>
+              </div>
+            )}
+
+            {/* Step 1 Result: Preview & Confirmation Card before Sending to Cloud */}
+            {inspectedMedia && (
+              <div className="p-4 sm:p-5 bg-slate-950 rounded-2xl border border-rose-500/40 space-y-4 shadow-xl">
+                {/* Header of Preview */}
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
+                  <div className="flex items-center gap-2 text-rose-400 text-xs font-bold">
+                    <Eye className="w-4 h-4" />
+                    <span>اطلاعات استخراج‌شده اثر (پیش‌نمایش قبل از ارسال به ابر آروان)</span>
+                  </div>
+
+                  {inspectedMedia.isDuplicate && (
+                    <span className="px-2.5 py-1 bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded-lg text-xs font-bold flex items-center gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                      <span>
+                        این اثر قبلاً در سیستم ثبت شده است (
+                        {inspectedMedia.duplicateLocation === 'database' ? 'در دیتابیس عمومی' : 'در صف بررسی'}
+                        )
+                      </span>
+                    </span>
+                  )}
+                </div>
+
+                {/* Media details card */}
+                <div className="flex flex-col md:flex-row items-start gap-4">
+                  {inspectedMedia.thumbnail ? (
+                    <div className="flex flex-col gap-2 shrink-0 w-full md:w-56">
+                      <div className="relative w-full h-32 rounded-xl overflow-hidden bg-slate-900 border border-slate-800">
+                        <img
+                          src={inspectedMedia.thumbnail}
+                          alt={inspectedMedia.title}
+                          className="w-full h-full object-cover"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowMediaPreviewPlayer((p) => !p)}
+                          className="absolute inset-0 bg-black/40 hover:bg-black/20 flex flex-col items-center justify-center text-white transition-all gap-1 cursor-pointer"
+                          title="پخش و شنیدن پیش‌نمایش"
+                        >
+                          <Play className="w-8 h-8 drop-shadow text-rose-400" />
+                          <span className="text-[11px] font-bold bg-black/60 px-2 py-0.5 rounded-md">
+                            {showMediaPreviewPlayer ? 'بستن پلیر' : 'پخش آنلاین پیش‌نمایش'}
+                          </span>
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-1">
+                        <a
+                          href={inspectedMedia.playbackUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[11px] text-sky-400 hover:underline flex items-center gap-1 font-mono"
+                        >
+                          <span>لینک پخش در مبدا</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+
+                        <button
+                          type="button"
+                          onClick={() => setShowMediaPreviewPlayer((p) => !p)}
+                          className="text-[11px] text-rose-400 hover:text-rose-300 font-semibold"
+                        >
+                          {showMediaPreviewPlayer ? 'بستن پلیر' : '▶ پخش پلیر'}
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="flex-1 space-y-3 min-w-0 w-full">
+                    {/* Live Video / Audio Player Preview Drawer */}
+                    {showMediaPreviewPlayer && (
+                      <div className="rounded-xl overflow-hidden border border-rose-500/40 bg-black p-2 space-y-2 animate-in fade-in">
+                        <div className="flex items-center justify-between text-xs text-rose-300 pb-1 border-b border-slate-800">
+                          <span className="font-bold flex items-center gap-1.5">
+                            <Play className="w-3.5 h-3.5 text-rose-400" />
+                            <span>پلیر پخش پیش‌نمایش:</span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setShowMediaPreviewPlayer(false)}
+                            className="text-slate-400 hover:text-white px-1.5 py-0.5 rounded bg-slate-800"
+                          >
+                            ✕ بستن
+                          </button>
+                        </div>
+                        {inspectedMedia.embedUrl ? (
+                          <div className="aspect-video w-full rounded-lg overflow-hidden bg-slate-950">
+                            <iframe
+                              src={inspectedMedia.embedUrl}
+                              title={inspectedMedia.title}
+                              className="w-full h-full"
+                              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                              allowFullScreen
+                            />
+                          </div>
+                        ) : (
+                          <audio
+                            controls
+                            src={inspectedMedia.playbackUrl}
+                            className="w-full mt-1"
+                            autoPlay
+                          />
+                        )}
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-3 text-xs text-slate-400 flex-wrap">
+                      <span className="font-semibold text-rose-400">کانال / ناشر: {inspectedMedia.uploader}</span>
+                      <span>·</span>
+                      <span>مدت تخمینی: {toPersianDigits(formatDuration(inspectedMedia.duration || 240))}</span>
+                      <span>·</span>
+                      <span className="text-emerald-400 font-mono text-[11px]">کیفیت صوتی: {ytBitrate} kbps</span>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">
+                        عنوان اثر صوتی (قابل ویرایش):
+                      </label>
+                      <input
+                        type="text"
+                        value={ytCustomTitle}
+                        onChange={(e) => setYtCustomTitle(e.target.value)}
+                        className="w-full px-3.5 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs sm:text-sm text-slate-100 font-semibold focus:outline-none focus:border-rose-500"
+                      />
+                    </div>
+
+                    {/* Metadata & Quality Selectors */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[11px] text-slate-400">مداح:</label>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setQuickReciterTarget('instant');
+                              setShowQuickAddReciterModal(true);
+                            }}
+                            className="text-[10px] text-emerald-400 hover:underline flex items-center gap-0.5"
+                          >
+                            <Plus className="w-2.5 h-2.5" />
+                            <span>مداح جدید</span>
+                          </button>
+                        </div>
+                        <select
+                          value={ytReciterId}
+                          onChange={(e) => {
+                            if (e.target.value === '__add_new__') {
+                              setQuickReciterTarget('instant');
+                              setShowQuickAddReciterModal(true);
+                            } else {
+                              setYtReciterId(e.target.value);
+                            }
+                          }}
+                          className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-rose-500"
+                        >
+                          {reciters.map((r) => (
+                            <option key={r.id} value={r.id}>
+                              {r.title}
+                            </option>
+                          ))}
+                          <option value="__add_new__">+ افزودن مداح جدید...</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] text-slate-400 mb-1">دسته‌بندی:</label>
+                        <select
+                          value={ytCategoryId}
+                          onChange={(e) => setYtCategoryId(e.target.value)}
+                          className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-rose-500"
+                        >
+                          {categories
+                            .filter((c) => c.slug !== 'all')
+                            .map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] text-slate-400 mb-1">کیفیت صوت خروجی:</label>
+                        <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded-xl border border-slate-700">
+                          <button
+                            type="button"
+                            onClick={() => setYtBitrate('320')}
+                            className={`flex-1 py-1 text-[11px] font-bold rounded-lg transition-colors ${
+                              ytBitrate === '320' ? 'bg-rose-600 text-white' : 'text-slate-400'
+                            }`}
+                          >
+                            ۳۲۰ kbps
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setYtBitrate('128')}
+                            className={`flex-1 py-1 text-[11px] font-bold rounded-lg transition-colors ${
+                              ytBitrate === '128' ? 'bg-rose-600 text-white' : 'text-slate-400'
+                            }`}
+                          >
+                            ۱۲۸ kbps
+                          </button>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
-                {cookiesActionMsg && (
-                  <div
-                    className={`p-3 rounded-xl text-xs flex items-center gap-2 ${
-                      cookiesActionMsg.type === 'success'
-                        ? 'bg-emerald-950/80 border border-emerald-500/40 text-emerald-300'
-                        : 'bg-rose-950/80 border border-rose-500/40 text-rose-300'
-                    }`}
-                  >
-                    {cookiesActionMsg.type === 'success' ? (
-                      <CheckCircle2 className="w-4 h-4 shrink-0" />
-                    ) : (
-                      <AlertTriangle className="w-4 h-4 shrink-0" />
-                    )}
-                    <span>{cookiesActionMsg.text}</span>
+                {/* Progress bar during conversion and upload */}
+                {isYtProcessing && (
+                  <div className="p-4 bg-slate-900 rounded-xl border border-rose-500/40 space-y-2">
+                    <div className="flex items-center justify-between text-xs font-mono">
+                      <span className="text-rose-400 font-sans font-semibold flex items-center gap-2">
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        {ytProcessStep}
+                      </span>
+                      <span className="text-slate-300 tabular-nums">{toPersianDigits(ytProcessProgress)}%</span>
+                    </div>
+                    <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-l from-rose-500 to-amber-500 transition-all duration-300 rounded-full"
+                        style={{ width: `${ytProcessProgress}%` }}
+                      />
+                    </div>
                   </div>
                 )}
 
-                {/* Textarea for Cookies */}
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-medium text-slate-300">
-                      محتوای فایل cookies.txt (فرمت استاندارد Netscape):
-                    </label>
-                    {ytCookiesStatus.configured && (
-                      <button
-                        type="button"
-                        onClick={handleDeleteCookies}
-                        className="text-xs text-rose-400 hover:text-rose-300 flex items-center gap-1 font-semibold transition-colors"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>حذف کوکی‌های فعلی</span>
-                      </button>
-                    )}
-                  </div>
-                  <textarea
-                    rows={4}
-                    dir="ltr"
-                    value={ytCookiesInput}
-                    onChange={(e) => setYtCookiesInput(e.target.value)}
-                    placeholder="# Netscape HTTP Cookie File&#10;.youtube.com&#9;TRUE&#9;/&#9;TRUE&#9;1750000000&#9;VISITOR_INFO1_LIVE&#9;...&#10;.youtube.com&#9;TRUE&#9;/&#9;TRUE&#9;1750000000&#9;LOGIN_INFO&#9;..."
-                    className="w-full p-3 bg-slate-950 border border-slate-800 rounded-xl text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-rose-500 leading-relaxed"
-                  />
-                </div>
-
-                {/* Actions row */}
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <label className="cursor-pointer px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs rounded-xl font-bold transition-colors flex items-center justify-center gap-2 border border-slate-700">
-                      <UploadCloud className="w-4 h-4 text-slate-400" />
-                      <span>انتخاب فایل cookies.txt از دستگاه</span>
-                      <input
-                        type="file"
-                        accept=".txt"
-                        onChange={handleUploadCookiesFile}
-                        className="hidden"
-                      />
-                    </label>
-                  </div>
+                {/* Confirm & Cancel Actions */}
+                <div className="flex flex-wrap items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInspectedMedia(null);
+                      setYtInputUrl('');
+                      setYtCustomTitle('');
+                    }}
+                    disabled={isYtProcessing}
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-xl transition-colors cursor-pointer"
+                  >
+                    انصراف / استعلام اثر دیگر
+                  </button>
 
                   <button
                     type="button"
-                    onClick={() => handleSaveCookies()}
-                    disabled={isSavingCookies || !ytCookiesInput.trim()}
-                    className="px-6 py-2.5 bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-lg shadow-rose-600/20 transition-all flex items-center justify-center gap-2"
+                    onClick={() => handleConfirmExtractToCloud(true)}
+                    disabled={isYtProcessing}
+                    className="px-6 py-2.5 bg-gradient-to-l from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-slate-950 font-bold text-xs sm:text-sm rounded-xl shadow-lg shadow-emerald-500/20 transition-all flex items-center gap-2 active:scale-95 disabled:opacity-50 cursor-pointer"
                   >
-                    <Key className="w-4 h-4" />
-                    <span>{isSavingCookies ? 'در حال ذخیره‌سازی...' : 'ذخیره و فعال‌سازی کوکی‌های یوتیوب'}</span>
+                    <UploadCloud className="w-4 h-4" />
+                    <span>
+                      {inspectedMedia.isDuplicate
+                        ? 'تأیید و ارسال مجدد به ابر آروان'
+                        : 'تأیید و ارسال به ابر آروان و صف بررسی'}
+                    </span>
                   </button>
                 </div>
               </div>
             )}
           </div>
 
-          {/* Section 2: Monitored YouTube Channels */}
+          {/* Section 2: Monitored YouTube Channels (List View) */}
           <div className="bg-slate-900/90 rounded-2xl border border-slate-800 p-5 sm:p-6 space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-800 pb-3 gap-3">
               <div>
@@ -2473,21 +2623,21 @@ USING (true);
                 </div>
                 <button
                   onClick={() => setYtScanNotification(null)}
-                  className="text-slate-400 hover:text-white text-xs px-1.5 py-0.5 rounded"
+                  className="text-slate-400 hover:text-white text-xs px-1.5 py-0.5 rounded cursor-pointer"
                 >
                   ✕
                 </button>
               </div>
             )}
 
-            {/* Channel Preview Drawer/Modal */}
+            {/* Channel Preview Drawer */}
             {ytPreviewChannelId && (
               <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 text-xs font-bold text-slate-200">
                     <Eye className="w-4 h-4 text-indigo-400" />
                     <span>
-                      پیش‌نمایش ۵ ویدیوی آخر کانال «
+                      پیش‌نمایش ۵ ویدیوی اخیر کانال «
                       {youtubeChannels.find((c) => c.id === ytPreviewChannelId)?.channelName}»
                     </span>
                   </div>
@@ -2496,7 +2646,7 @@ USING (true);
                       setYtPreviewChannelId(null);
                       setYtChannelPreviewList([]);
                     }}
-                    className="text-xs text-slate-400 hover:text-white px-2 py-0.5 rounded bg-slate-800"
+                    className="text-xs text-slate-400 hover:text-white px-2 py-0.5 rounded bg-slate-800 cursor-pointer"
                   >
                     بستن پیش‌نمایش
                   </button>
@@ -2505,11 +2655,11 @@ USING (true);
                 {isPreviewingYt ? (
                   <div className="py-6 text-center text-xs text-slate-400 flex items-center justify-center gap-2 font-mono">
                     <RefreshCw className="w-4 h-4 animate-spin text-rose-400" />
-                    <span>در حال فراخوانی ویدیوهای کانال از یوتیوب...</span>
+                    <span>در حال دریافت ویدیوهای کانال از یوتیوب...</span>
                   </div>
                 ) : ytChannelPreviewList.length === 0 ? (
                   <div className="text-xs text-slate-500 text-center py-3">
-                    ویدیویی یافت نشد یا دسترسی با محدودیت یوتیوب مواجه شد. (کوکی‌های یوتیوب را در کادر بالا بررسی کنید)
+                    ویدیویی یافت نشد یا دسترسی یوتیوب نیازمند کوکی است.
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -2529,12 +2679,13 @@ USING (true);
                           onClick={() => {
                             setYtInputUrl(vid.url);
                             setYtCustomTitle(vid.title);
+                            handleInspectMedia(vid.url);
                             const el = document.getElementById('yt-url-input');
                             if (el) el.scrollIntoView({ behavior: 'smooth' });
                           }}
-                          className="px-2.5 py-1 bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white rounded text-[11px] font-bold transition-colors shrink-0"
+                          className="px-2.5 py-1 bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white rounded text-[11px] font-bold transition-colors shrink-0 cursor-pointer"
                         >
-                          انتقال به استخراج
+                          انتقال به استعلام
                         </button>
                       </div>
                     ))}
@@ -2543,141 +2694,226 @@ USING (true);
               </div>
             )}
 
-            {/* Channels Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {youtubeChannels.map((ch) => {
-                const isScanningThis = scanningChannelId === ch.id;
-                return (
-                  <div
-                    key={ch.id}
-                    className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 flex items-center justify-between gap-3"
-                  >
-                    <div className="min-w-0 space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-slate-100 text-xs sm:text-sm truncate">
-                          {ch.channelName}
-                        </span>
-                        {ch.isMonitored ? (
-                          <span className="bg-emerald-500/10 text-emerald-400 text-[10px] px-2 py-0.2 rounded border border-emerald-500/20">
-                            پایش فعال
-                          </span>
-                        ) : (
-                          <span className="bg-slate-800 text-slate-400 text-[10px] px-2 py-0.2 rounded">
-                            متوقف
-                          </span>
-                        )}
+            {/* Channels List (Structured Table/Row Layout instead of Cards) */}
+            <div className="rounded-xl border border-slate-800 bg-slate-950/70 divide-y divide-slate-800 overflow-hidden">
+              {youtubeChannels.length === 0 ? (
+                <div className="p-8 text-center text-xs text-slate-500">
+                  هنوز هیچ کانال یوتیوبی برای پایش خودکار ثبت نشده است. از فرم زیر کانال اضافه کنید.
+                </div>
+              ) : (
+                youtubeChannels.map((ch) => {
+                  const reciter = reciters.find((r) => r.id === ch.defaultReciterId);
+                  const isScanningThis = scanningChannelId === ch.id;
+                  return (
+                    <div
+                      key={ch.id}
+                      className="p-3.5 sm:p-4 hover:bg-slate-900/60 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs"
+                    >
+                      {/* Channel Info */}
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        <div className="w-10 h-10 rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400 shrink-0">
+                          <Youtube className="w-5 h-5" />
+                        </div>
+                        <div className="min-w-0 flex-1 space-y-0.5">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-bold text-slate-100 text-sm truncate">{ch.channelName}</span>
+                            <a
+                              href={ch.channelUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-mono text-[11px] text-rose-400 hover:underline flex items-center gap-0.5"
+                            >
+                              <span>{ch.channelHandle}</span>
+                              <ExternalLink className="w-2.5 h-2.5" />
+                            </a>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700/60">
+                              مداح: {reciter?.name || 'مداح منتخب'}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-3 text-[11px] text-slate-400 flex-wrap">
+                            <span>آخرین پایش: <strong className="text-slate-300 font-normal">{ch.lastCheckedAt}</strong></span>
+                            <span>·</span>
+                            <span className="font-mono text-emerald-400 font-semibold">{toPersianDigits(ch.totalExtracted)} قطعه استخراج‌شده</span>
+                          </div>
+                        </div>
                       </div>
 
-                      <div className="flex items-center gap-2 text-xs text-slate-400">
-                        <span className="font-mono text-rose-400 text-[11px]">{ch.channelHandle}</span>
-                        <span className="text-slate-600">·</span>
-                        <span>آخرین پایش: {ch.lastCheckedAt}</span>
-                      </div>
+                      {/* Actions Row */}
+                      <div className="flex items-center gap-2 shrink-0 justify-end">
+                        {/* Status Toggle */}
+                        <button
+                          type="button"
+                          onClick={() => handleToggleChannelMonitoring(ch.id, ch.isMonitored)}
+                          className={`px-3 py-1 rounded-lg text-[11px] font-bold border transition-colors cursor-pointer ${
+                            ch.isMonitored
+                              ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20'
+                              : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'
+                          }`}
+                        >
+                          {ch.isMonitored ? 'پایش فعال' : 'متوقف'}
+                        </button>
 
-                      <div className="text-[11px] text-slate-500 font-mono">
-                        تعداد استخراج شده: {toPersianDigits(ch.totalExtracted)} قطعه صوتی
+                        {/* Scan single channel */}
+                        <button
+                          type="button"
+                          onClick={() => handleScanSingleChannelNow(ch)}
+                          disabled={isScanningThis || isScanningAllYt}
+                          className="px-2.5 py-1 bg-rose-600/10 hover:bg-rose-600/20 text-rose-300 border border-rose-500/20 rounded-lg flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer"
+                          title="پایش فوری و استخراج ویدیوهای جدید این کانال"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${isScanningThis ? 'animate-spin' : ''}`} />
+                          <span className="text-[11px] font-bold">پایش فوری</span>
+                        </button>
+
+                        {/* Preview 5 videos */}
+                        <button
+                          type="button"
+                          onClick={() => handlePreviewChannelVideos(ch)}
+                          disabled={isPreviewingYt}
+                          className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-indigo-300 rounded-lg flex items-center gap-1 transition-colors cursor-pointer"
+                          title="مشاهده ۵ ویدیوی اخیر"
+                        >
+                          <Eye className="w-3 h-3 text-indigo-400" />
+                          <span className="text-[11px]">ویدیوها</span>
+                        </button>
+
+                        {/* Delete */}
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteYouTubeChannel(ch.id, ch.channelName)}
+                          className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors cursor-pointer"
+                          title="حذف کانال از پایش"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     </div>
-
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {/* Scan Single Channel Now */}
-                      <button
-                        onClick={() => handleScanSingleChannelNow(ch)}
-                        disabled={isScanningThis || isScanningAllYt}
-                        className="p-2 bg-slate-900 hover:bg-slate-800 text-rose-400 hover:text-rose-300 rounded-lg transition-colors disabled:opacity-50"
-                        title="پایش فوری و استخراج ویدیوهای جدید این کانال"
-                      >
-                        <RefreshCw className={`w-3.5 h-3.5 ${isScanningThis ? 'animate-spin' : ''}`} />
-                      </button>
-
-                      {/* Preview videos */}
-                      <button
-                        onClick={() => handlePreviewChannelVideos(ch)}
-                        disabled={isPreviewingYt}
-                        className="p-2 bg-slate-900 hover:bg-slate-800 text-indigo-400 hover:text-indigo-300 rounded-lg transition-colors"
-                        title="مشاهده ۵ ویدیوی آخر کانال"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                      </button>
-
-                      {/* Open YouTube external */}
-                      <a
-                        href={ch.channelUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="p-2 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg transition-colors"
-                        title="مشاهده کانال در یوتیوب"
-                      >
-                        <ExternalLink className="w-3.5 h-3.5" />
-                      </a>
-
-                      {/* Toggle monitor */}
-                      <button
-                        onClick={() => handleToggleChannelMonitoring(ch.id, ch.isMonitored)}
-                        className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors border ${
-                          ch.isMonitored
-                            ? 'bg-rose-500/10 text-rose-300 border-rose-500/20 hover:bg-rose-500/20'
-                            : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20 hover:bg-emerald-500/20'
-                        }`}
-                      >
-                        {ch.isMonitored ? 'توقف' : 'فعال'}
-                      </button>
-
-                      {/* Delete Channel */}
-                      <button
-                        onClick={() => handleDeleteYouTubeChannel(ch.id, ch.channelName)}
-                        className="p-1.5 text-slate-500 hover:text-rose-400 rounded-lg hover:bg-rose-500/10 transition-colors"
-                        title="حذف کانال از پایش"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
+                  );
+                })
+              )}
             </div>
 
-            {/* Add Channel Inline Form */}
-            <div className="pt-3 border-t border-slate-800">
-              <span className="text-xs font-bold text-slate-200 block mb-2">
+            {/* Add Channel Form */}
+            <div className="pt-3 border-t border-slate-800 space-y-2">
+              <span className="text-xs font-bold text-slate-200 block">
                 افزودن کانال یوتیوب جدید به پایش خودکار:
               </span>
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
-                <input
-                  type="text"
-                  placeholder="نام کانال (مثلاً: رایه العباس)"
-                  value={newYtChannelName}
-                  onChange={(e) => setNewYtChannelName(e.target.value)}
-                  className="px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-rose-500"
-                />
-                <input
-                  type="text"
-                  dir="ltr"
-                  placeholder="هندل یوتیوب (مثلاً: RayatAlAbbas@)"
-                  value={newYtChannelHandle}
-                  onChange={(e) => setNewYtChannelHandle(e.target.value)}
-                  className="px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-rose-500 font-mono"
-                />
-                <select
-                  value={newYtChannelReciterId}
-                  onChange={(e) => setNewYtChannelReciterId(e.target.value)}
-                  className="px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-rose-500"
-                >
-                  {reciters.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      مداح: {r.name}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={handleAddYouTubeChannel}
-                  disabled={!newYtChannelName.trim()}
-                  className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl shadow transition-colors disabled:opacity-50"
-                >
-                  افزودن به پایش خودکار
-                </button>
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                <div className="sm:col-span-4">
+                  <div className="relative">
+                    <input
+                      type="text"
+                      dir="ltr"
+                      placeholder="هندل یوتیوب (مانند Fotros_ir@ یا آدرس کانال)"
+                      value={newYtChannelHandle}
+                      onChange={(e) => setNewYtChannelHandle(e.target.value)}
+                      onBlur={() => {
+                        if (newYtChannelHandle.trim() && !newYtChannelName.trim()) {
+                          handleInspectChannelInfo();
+                        }
+                      }}
+                      className="w-full pl-20 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-rose-500 font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleInspectChannelInfo}
+                      disabled={isInspectingChannel || !newYtChannelHandle.trim()}
+                      className="absolute left-1.5 top-1/2 -translate-y-1/2 px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-rose-300 text-[10px] rounded font-semibold transition-colors disabled:opacity-50"
+                      title="استعلام خودکار نام کانال و مداح"
+                    >
+                      {isInspectingChannel ? '...' : '⚡ استعلام'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="sm:col-span-3">
+                  <input
+                    type="text"
+                    placeholder="نام کانال (مثلاً: پایگاه فطرس)"
+                    value={newYtChannelName}
+                    onChange={(e) => setNewYtChannelName(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-rose-500"
+                  />
+                </div>
+
+                <div className="sm:col-span-3 flex items-center gap-1">
+                  <select
+                    value={newYtChannelReciterId}
+                    onChange={(e) => {
+                      if (e.target.value === '__add_new__') {
+                        setQuickReciterTarget('channel');
+                        setShowQuickAddReciterModal(true);
+                      } else {
+                        setNewYtChannelReciterId(e.target.value);
+                      }
+                    }}
+                    className="flex-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-rose-500"
+                  >
+                    {reciters.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        مداح: {r.name}
+                      </option>
+                    ))}
+                    <option value="__add_new__">+ افزودن مداح جدید...</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setQuickReciterTarget('channel');
+                      setShowQuickAddReciterModal(true);
+                    }}
+                    className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs shrink-0 cursor-pointer"
+                    title="افزودن مداح جدید به لیست"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <div className="sm:col-span-2">
+                  <button
+                    type="button"
+                    onClick={handleAddYouTubeChannel}
+                    disabled={!newYtChannelName.trim()}
+                    className="w-full py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl shadow transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    افزودن کانال
+                  </button>
+                </div>
               </div>
+
+              {/* Auto-suggested Reciter Banner */}
+              {suggestedCandidateReciter && (
+                <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-emerald-950/60 border border-emerald-500/30 text-xs text-emerald-300">
+                  <div className="flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span>مداح تشخیص‌داده‌شده از نام کانال: <strong className="text-emerald-200">{suggestedCandidateReciter.name}</strong></span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (suggestedCandidateReciter.id) {
+                          setNewYtChannelReciterId(suggestedCandidateReciter.id);
+                        } else {
+                          setQuickReciterName(suggestedCandidateReciter.name);
+                          setQuickReciterTarget('channel');
+                          setShowQuickAddReciterModal(true);
+                        }
+                      }}
+                      className="px-2.5 py-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-[11px] transition-colors"
+                    >
+                      {suggestedCandidateReciter.id ? '✓ انتخاب این مداح' : '+ ثبت به عنوان مداح جدید'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSuggestedCandidateReciter(null)}
+                      className="text-slate-400 hover:text-white text-xs px-1"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -4295,8 +4531,246 @@ CMD ["python", "telegram_scraper.py"]`}
         </div>
       )}
 
+      {/* Tab 6: Settings, YouTube Cookies & Database Maintenance */}
+      {activeAdminTab === 'settings' && (
+        <div className="space-y-6 max-w-5xl mx-auto">
+          {/* Header */}
+          <div className="bg-slate-900/90 rounded-2xl border border-slate-800 p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                <Settings className="w-5 h-5 text-amber-400" />
+                <span>تنظیمات سیستم، کوکی‌های یوتیوب و پایگاه داده</span>
+              </h3>
+              <p className="text-xs text-slate-400 mt-1">
+                مدیریت کوکی‌های حساب کاربری یوتیوب جهت دور زدن محدودیت‌های ضدربات، وضعیت سلامت دیتابیس محلی و ابر آروان.
+              </p>
+            </div>
 
-      {/* Edit Track Modal */}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={fetchCookiesStatus}
+                className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>بررسی وضعیت کوکی</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Section 1: YouTube Cookies Manager */}
+          <div className="bg-slate-900/90 rounded-2xl border border-slate-800 p-6 space-y-5">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Key className="w-5 h-5 text-amber-400" />
+                <h4 className="text-sm font-bold text-slate-100">
+                  مدیریت کوکی‌های حساب کاربری یوتیوب (رفع خطای تایید هویت و ضدربات)
+                </h4>
+              </div>
+
+              {ytCookiesStatus.configured ? (
+                <span className="px-3 py-1 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 rounded-xl text-xs font-bold flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>کوکی فعال ({toPersianDigits(ytCookiesStatus.entryCount)} ورودی)</span>
+                </span>
+              ) : (
+                <span className="px-3 py-1 bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-xl text-xs font-bold flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  <span>کوکی تنظیم نشده</span>
+                </span>
+              )}
+            </div>
+
+            {/* Notification */}
+            {cookiesActionMsg && (
+              <div
+                className={`p-3.5 rounded-xl text-xs flex items-center justify-between gap-2 ${
+                  cookiesActionMsg.type === 'success'
+                    ? 'bg-emerald-950/80 border border-emerald-500/40 text-emerald-300'
+                    : cookiesActionMsg.type === 'error'
+                    ? 'bg-rose-950/80 border border-rose-500/40 text-rose-300'
+                    : 'bg-amber-950/80 border border-amber-500/40 text-amber-300'
+                }`}
+              >
+                <span>{cookiesActionMsg.text}</span>
+                <button
+                  onClick={() => setCookiesActionMsg(null)}
+                  className="text-slate-400 hover:text-white text-xs px-1"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            {/* Cookies Info Stats */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="p-3.5 bg-slate-950 rounded-xl border border-slate-800">
+                <span className="text-[11px] text-slate-400 block mb-1">وضعیت احراز هویت:</span>
+                <span className={`text-xs font-bold ${ytCookiesStatus.configured ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {ytCookiesStatus.configured ? '✅ فعال و متصل به موتور yt-dlp' : '⚠️ کوکی ثبت نشده'}
+                </span>
+              </div>
+              <div className="p-3.5 bg-slate-950 rounded-xl border border-slate-800">
+                <span className="text-[11px] text-slate-400 block mb-1">تعداد رکوردهای کوکی:</span>
+                <span className="text-xs font-mono font-bold text-slate-200">
+                  {toPersianDigits(ytCookiesStatus.entryCount)} رکورد ({formatFileSize(ytCookiesStatus.sizeBytes)})
+                </span>
+              </div>
+              <div className="p-3.5 bg-slate-950 rounded-xl border border-slate-800">
+                <span className="text-[11px] text-slate-400 block mb-1">آخرین زمان به‌روزرسانی:</span>
+                <span className="text-xs font-mono text-slate-300">
+                  {ytCookiesStatus.lastModified ? new Date(ytCookiesStatus.lastModified).toLocaleString('fa-IR') : 'هنوز ثبتی انجام نشده'}
+                </span>
+              </div>
+            </div>
+
+            {/* Cookies Input Area */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium text-slate-300">
+                  محتوای متنی فایل کوکی (فرمت استاندارد Netscape / cookies.txt):
+                </label>
+                <label className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-sky-400 hover:text-sky-300 rounded-lg text-xs font-semibold cursor-pointer transition-colors flex items-center gap-1.5 border border-slate-700">
+                  <UploadCloud className="w-3.5 h-3.5" />
+                  <span>آپلود فایل cookies.txt</span>
+                  <input
+                    type="file"
+                    accept=".txt"
+                    onChange={handleUploadCookiesFile}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+
+              <textarea
+                dir="ltr"
+                rows={6}
+                value={ytCookiesInput}
+                onChange={(e) => setYtCookiesInput(e.target.value)}
+                placeholder="# Netscape HTTP Cookie File&#10;# https://curl.haxx.se/rfc/cookie_spec.html&#10;.youtube.com&#9;TRUE&#9;/&#9;TRUE&#9;1750000000&#9;VISITOR_INFO1_LIVE&#9;...&#10;.youtube.com&#9;TRUE&#9;/&#9;TRUE&#9;1750000000&#9;LOGIN_INFO&#9;..."
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs font-mono text-slate-200 focus:outline-none focus:border-amber-500 placeholder-slate-700"
+              />
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleSaveCookies()}
+                  disabled={isSavingCookies || !ytCookiesInput.trim()}
+                  className="px-5 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-xl shadow-md transition-all flex items-center gap-2 cursor-pointer"
+                >
+                  <Key className="w-4 h-4" />
+                  <span>{isSavingCookies ? 'در حال ذخیره‌سازی...' : 'ذخیره و فعال‌سازی کوکی‌ها'}</span>
+                </button>
+
+                {ytCookiesStatus.configured && (
+                  <button
+                    type="button"
+                    onClick={handleDeleteCookies}
+                    className="px-4 py-2.5 bg-slate-800 hover:bg-rose-950/60 text-slate-300 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 rounded-xl text-xs font-semibold transition-colors flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>حذف کوکی‌های ذخیره‌شده</span>
+                  </button>
+                )}
+              </div>
+
+              <span className="text-[11px] text-slate-500">
+                🔒 کوکی‌ها به صورت محلی در مسیر امن سرور ذخیره می‌شوند.
+              </span>
+            </div>
+
+            {/* Persian Guide */}
+            <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-2 text-xs text-slate-300">
+              <div className="font-bold text-amber-400 flex items-center gap-1.5">
+                <span>💡 راهنمای ساده دریافت کوکی یوتیوب:</span>
+              </div>
+              <ol className="list-decimal list-inside space-y-1.5 text-slate-400 leading-relaxed pr-2">
+                <li>
+                  در مرورگر گوگل کروم یا فایرفاکس، افزونه رایگان{' '}
+                  <strong className="text-slate-200">«Get cookies.txt LOCALLY»</strong> را نصب کنید.
+                </li>
+                <li>وارد سایت <strong className="text-slate-200">youtube.com</strong> شوید و مطمئن شوید وارد حساب کاربری خود شده‌اید.</li>
+                <li>روی آیکون افزونه کلیک کرده و گزینه <strong className="text-slate-200">Export as cookies.txt</strong> را بزنید.</li>
+                <li>فایل دانلودشده را با دکمه بالا آپلود کرده یا محتوای آن را در کادر بالا پیست کنید و دکمه ذخیره را بزنید.</li>
+              </ol>
+            </div>
+          </div>
+
+          {/* Section 2: Database Status & Maintenance */}
+          <div className="bg-slate-900/90 rounded-2xl border border-slate-800 p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Database className="w-5 h-5 text-emerald-400" />
+                <h4 className="text-sm font-bold text-slate-100">
+                  وضعیت پایگاه داده مستقل و سلامت سیستم
+                </h4>
+              </div>
+              <span className="text-xs text-slate-400 font-mono">
+                موتور: JSON LocalDB + Arvan S3
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-center">
+                <span className="text-lg font-bold text-emerald-400 font-mono block">
+                  {toPersianDigits(tracks.length)}
+                </span>
+                <span className="text-[11px] text-slate-400">قطعه صوتی فعال</span>
+              </div>
+              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-center">
+                <span className="text-lg font-bold text-amber-400 font-mono block">
+                  {toPersianDigits(pendingQueue.length)}
+                </span>
+                <span className="text-[11px] text-slate-400">در صف بررسی</span>
+              </div>
+              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-center">
+                <span className="text-lg font-bold text-sky-400 font-mono block">
+                  {toPersianDigits(reciters.length)}
+                </span>
+                <span className="text-[11px] text-slate-400">مداح ثبت‌شده</span>
+              </div>
+              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-center">
+                <span className="text-lg font-bold text-indigo-400 font-mono block">
+                  {toPersianDigits(categories.length)}
+                </span>
+                <span className="text-[11px] text-slate-400">دسته‌بندی</span>
+              </div>
+              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-center">
+                <span className="text-lg font-bold text-rose-400 font-mono block">
+                  {toPersianDigits(youtubeChannels.length)}
+                </span>
+                <span className="text-[11px] text-slate-400">کانال یوتیوب</span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-800">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (onDbRefresh) onDbRefresh();
+                    setDbFeedbackMsg({ type: 'success', msg: 'اطلاعات با موفقیت از پایگاه داده همگام شد.' });
+                    setTimeout(() => setDbFeedbackMsg(null), 3000);
+                  }}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>همگام‌سازی مجدد داده‌ها</span>
+                </button>
+              </div>
+
+              {dbFeedbackMsg && (
+                <span className={`text-xs ${dbFeedbackMsg.type === 'success' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {dbFeedbackMsg.msg}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       {editingTrack && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-lg w-full space-y-4 shadow-2xl">
@@ -4584,6 +5058,72 @@ CMD ["python", "telegram_scraper.py"]`}
                 className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold transition-colors disabled:opacity-50"
               >
                 {isSavingCategory ? 'در حال ثبت...' : 'ثبت دسته‌بندی'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Quick Add Reciter Modal */}
+      {showQuickAddReciterModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h4 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                <Radio className="w-4 h-4 text-emerald-400" />
+                <span>افزودن مداح جدید به سامانه</span>
+              </h4>
+              <button
+                onClick={() => setShowQuickAddReciterModal(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  نام مداح / ذاکر اهل بیت (ع) *
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="مثلاً: محمدحسین پویانفر یا ذوالفقار الکعبی"
+                  value={quickReciterName}
+                  onChange={(e) => setQuickReciterName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleQuickAddReciter();
+                    }
+                  }}
+                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-100 focus:outline-none focus:border-emerald-500"
+                  autoFocus
+                />
+              </div>
+
+              <div className="text-[11px] text-slate-400 leading-relaxed">
+                این مداح به فهرست مداحان سامانه اضافه می‌شود و مستقیماً برای{' '}
+                <strong className="text-slate-300">{quickReciterTarget === 'channel' ? 'کانال یوتیوب' : 'قطعه جاری'}</strong> انتخاب خواهد شد.
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setShowQuickAddReciterModal(false)}
+                className="px-4 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white"
+              >
+                انصراف
+              </button>
+              <button
+                type="button"
+                onClick={handleQuickAddReciter}
+                disabled={!quickReciterName.trim()}
+                className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold transition-colors disabled:opacity-50"
+              >
+                افزودن و انتخاب مداح
               </button>
             </div>
           </div>

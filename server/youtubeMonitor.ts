@@ -48,6 +48,7 @@ export interface ScanResult {
   channelHandle: string;
   totalFound: number;
   newVideosProcessed: number;
+  duplicatesSkipped: number;
   newDiscovered: DiscoveredVideo[];
   discoveredVideos: DiscoveredVideo[];
   extractedTracks: Track[];
@@ -66,6 +67,7 @@ export interface MonitorStatus {
     channelsScanned: number;
     newTracksAdded: number;
     newDiscoveredCount?: number;
+    totalDuplicatesSkipped?: number;
     timestamp: string;
   };
 }
@@ -211,23 +213,48 @@ class YouTubeMonitoringService {
       const existingQueue = localDb.getPendingQueue();
       const existingDiscovered = localDb.getDiscoveredVideos();
 
+      const extractYtId = (url?: string): string | null => {
+        if (!url) return null;
+        const m = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/))([\w-]{11})/i);
+        return m ? m[1] : null;
+      };
+
+      const normalizeTitle = (t?: string): string => {
+        if (!t) return '';
+        return t
+          .toLowerCase()
+          .replace(/[\u200c\s_\-–—:؛،,\.\|\(\)\[\]]+/g, ' ')
+          .trim();
+      };
+
       const isVideoKnown = (v: ChannelVideoSummary) => {
-        return (
-          existingTracks.some(
-            (t) =>
-              (t.sourceUrl && t.sourceUrl.includes(v.id)) ||
-              t.title.trim().toLowerCase() === v.title.trim().toLowerCase()
-          ) ||
-          existingQueue.some(
-            (q) =>
-              (q.sourceUrl && q.sourceUrl.includes(v.id)) ||
-              q.title.trim().toLowerCase() === v.title.trim().toLowerCase()
-          ) ||
-          existingDiscovered.some((d) => d.id === v.id)
-        );
+        const normVTitle = normalizeTitle(v.title);
+        // 1. Check existing published tracks
+        for (const t of existingTracks) {
+          if (t.id === v.id || t.id.includes(v.id)) return true;
+          if (t.sourceUrl && (t.sourceUrl.includes(v.id) || extractYtId(t.sourceUrl) === v.id)) return true;
+          if (t.s3Key && t.s3Key.includes(v.id)) return true;
+          if (t.audioUrl && t.audioUrl.includes(v.id)) return true;
+          if (normVTitle && normalizeTitle(t.title) === normVTitle) return true;
+        }
+        // 2. Check pending queue
+        for (const q of existingQueue) {
+          if (q.id === v.id || q.id.includes(v.id)) return true;
+          if (q.sourceUrl && (q.sourceUrl.includes(v.id) || extractYtId(q.sourceUrl) === v.id)) return true;
+          if (q.s3Key && q.s3Key.includes(v.id)) return true;
+          if (q.audioUrl && q.audioUrl.includes(v.id)) return true;
+          if (normVTitle && normalizeTitle(q.title) === normVTitle) return true;
+        }
+        // 3. Check already discovered videos
+        for (const d of existingDiscovered) {
+          if (d.id === v.id) return true;
+          if (normVTitle && normalizeTitle(d.title) === normVTitle) return true;
+        }
+        return false;
       };
 
       const newVideos = latestVideos.filter((v) => !isVideoKnown(v));
+      const duplicatesSkipped = latestVideos.length - newVideos.length;
 
       const newDiscovered: DiscoveredVideo[] = newVideos.map((v) => ({
         id: v.id,
@@ -248,8 +275,8 @@ class YouTubeMonitoringService {
         localDb.addDiscoveredVideos(newDiscovered);
       }
 
-      // If channel is configured for automatic approval AND S3 is available, convert immediately
-      if (channel.autoApprove && s3Helpers) {
+      // Process new videos into pendingQueue (or direct approved if autoApprove)
+      if (s3Helpers && newVideos.length > 0) {
         for (const video of newVideos.slice(0, 2)) {
           try {
             const track = await this.extractAndStoreVideo(video, channel, s3Helpers);
@@ -264,16 +291,52 @@ class YouTubeMonitoringService {
         }
       }
 
+      // If any new video could not be converted with S3, also add as pending item so admin can review
+      if (extractedTracks.length === 0 && newDiscovered.length > 0) {
+        for (const disc of newDiscovered.slice(0, 3)) {
+          const defaultRec = localDb.getReciters().find((r) => r.id === disc.defaultReciterId) || localDb.getReciters()[0];
+          const defaultCat = localDb.getCategories().find((c) => c.id === disc.defaultCategoryId) || localDb.getCategories()[1];
+          const pendingItem: Track = {
+            id: `queue-yt-${disc.id}`,
+            title: disc.title,
+            reciterId: defaultRec?.id || 'rec-karimi',
+            reciterName: defaultRec?.name || 'مداح منتخب',
+            categoryId: defaultCat?.id || 'cat-moharram',
+            categoryName: defaultCat?.name || 'محرم و عاشورا',
+            duration: disc.duration || 240,
+            audioUrl: disc.url,
+            coverUrl: disc.thumbnailUrl,
+            fileSizeMb: 6.5,
+            bitrate: '320 kbps',
+            lyrics: [],
+            status: 'pending',
+            sourceType: 'youtube',
+            sourceUrl: disc.url,
+            sourceChannelName: disc.channelName,
+            playCount: 0,
+            createdAt: `پایش یوتیوب (${new Date().toLocaleDateString('fa-IR')})`,
+            s3Key: `incoming/youtube/${disc.id}.mp3`,
+            tags: ['پایش یوتیوب', disc.channelName, defaultRec?.name || 'مداحی'],
+          };
+          localDb.addToQueue(pendingItem);
+          extractedTracks.push(pendingItem);
+        }
+      }
+
       // Update channel metadata
       localDb.updateYoutubeChannel(channel.id, {
         lastCheckedAt: new Date().toLocaleTimeString('fa-IR'),
         totalExtracted: (channel.totalExtracted || 0) + extractedTracks.length,
       });
 
-      const resultMsg =
-        newDiscovered.length > 0
-          ? `پایش کانال «${channel.channelName}» با موفقیت انجام شد: ${newDiscovered.length} ویدیوی جدید با مشخصات و لینک پخش جهت بررسی و تایید در لیست قرار گرفت.`
-          : `پایش کانال «${channel.channelName}» تکمیل شد. اثر جدیدی یافت نشد.`;
+      let resultMsg = '';
+      if (extractedTracks.length > 0) {
+        resultMsg = `پایش کانال «${channel.channelName}»: ${extractedTracks.length} اثر جدید به صف بررسی اضافه شد${duplicatesSkipped > 0 ? ` (${duplicatesSkipped} مورد تکراری رد شد)` : ''}.`;
+      } else if (duplicatesSkipped > 0) {
+        resultMsg = `پایش کانال «${channel.channelName}»: تمام ویدیوهای اخیر (${duplicatesSkipped} مورد) تکراری بودند و رد شدند (قبلاً در سیستم ثبت شده‌اند).`;
+      } else {
+        resultMsg = `پایش کانال «${channel.channelName}» تکمیل شد. ویدیوی جدیدی یافت نشد.`;
+      }
 
       localDb.addLog({
         id: `log-${Date.now()}`,
@@ -289,6 +352,7 @@ class YouTubeMonitoringService {
         channelHandle: channel.channelHandle,
         totalFound: latestVideos.length,
         newVideosProcessed: extractedTracks.length,
+        duplicatesSkipped,
         newDiscovered,
         discoveredVideos: localDb.getDiscoveredVideos(),
         extractedTracks,
@@ -541,6 +605,7 @@ class YouTubeMonitoringService {
     channelsScanned: number;
     newTracksAdded: number;
     newDiscoveredCount: number;
+    totalDuplicatesSkipped?: number;
     discoveredVideos: DiscoveredVideo[];
     results: ScanResult[];
   }> {
@@ -548,6 +613,7 @@ class YouTubeMonitoringService {
     const results: ScanResult[] = [];
     let totalProcessed = 0;
     let totalDiscovered = 0;
+    let totalDuplicatesSkipped = 0;
 
     for (const channel of channels) {
       try {
@@ -555,6 +621,7 @@ class YouTubeMonitoringService {
         results.push(res);
         totalProcessed += res.newVideosProcessed;
         totalDiscovered += res.newDiscovered.length;
+        totalDuplicatesSkipped += res.duplicatesSkipped || 0;
       } catch (err: any) {
         results.push({
           channelId: channel.id,
@@ -562,6 +629,7 @@ class YouTubeMonitoringService {
           channelHandle: channel.channelHandle,
           totalFound: 0,
           newVideosProcessed: 0,
+          duplicatesSkipped: 0,
           newDiscovered: [],
           discoveredVideos: localDb.getDiscoveredVideos(),
           extractedTracks: [],
@@ -575,6 +643,7 @@ class YouTubeMonitoringService {
       channelsScanned: channels.length,
       newTracksAdded: totalProcessed,
       newDiscoveredCount: totalDiscovered,
+      totalDuplicatesSkipped,
       timestamp: new Date().toISOString(),
     };
 
@@ -582,8 +651,82 @@ class YouTubeMonitoringService {
       channelsScanned: channels.length,
       newTracksAdded: totalProcessed,
       newDiscoveredCount: totalDiscovered,
+      totalDuplicatesSkipped,
       discoveredVideos: localDb.getDiscoveredVideos(),
       results,
+    };
+  }
+
+  public async inspectChannel(
+    channelUrlOrHandle: string
+  ): Promise<{
+    channelName: string;
+    channelHandle: string;
+    channelUrl: string;
+    suggestedReciterId?: string;
+    suggestedReciterName?: string;
+  }> {
+    const rawUrl = this.normalizeChannelUrl(channelUrlOrHandle);
+    let channelHandle = '';
+    const handleMatch = rawUrl.match(/@([\w\.\-]+)/);
+    if (handleMatch) {
+      channelHandle = `@${handleMatch[1]}`;
+    }
+
+    let detectedName = '';
+
+    // Fast oEmbed / web metadata fetch
+    try {
+      const res = await fetch(rawUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+        signal: AbortSignal.timeout(6000),
+      });
+      if (res.ok) {
+        const html = await res.text();
+        const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+        if (titleMatch && titleMatch[1]) {
+          detectedName = titleMatch[1].replace(/\s*-\s*YouTube\s*$/i, '').trim();
+        }
+      }
+    } catch (_) {}
+
+    if (!detectedName && channelHandle) {
+      detectedName = channelHandle.replace('@', '');
+    }
+
+    // Match against reciters in local DB
+    const reciters = localDb.getReciters();
+    let matchedReciter = reciters.find((r) => {
+      const n = r.name.toLowerCase();
+      const t = r.title.toLowerCase();
+      const checkText = `${detectedName} ${channelHandle}`.toLowerCase();
+      return checkText.includes(n) || checkText.includes(t);
+    });
+
+    // Heuristics for famous reciters if not exact match
+    if (!matchedReciter) {
+      const combined = `${detectedName} ${channelHandle}`.toLowerCase();
+      if (combined.includes('کریمی') || combined.includes('فطرس') || combined.includes('fotros')) {
+        matchedReciter = reciters.find((r) => r.id === 'rec-karimi');
+      } else if (combined.includes('مطیعی') || combined.includes('motiee') || combined.includes('motiei')) {
+        matchedReciter = reciters.find((r) => r.id === 'rec-motiee');
+      } else if (combined.includes('رسولی') || combined.includes('rasouli')) {
+        matchedReciter = reciters.find((r) => r.id === 'rec-rasouli');
+      } else if (combined.includes('طاهری') || combined.includes('taheri')) {
+        matchedReciter = reciters.find((r) => r.id === 'rec-taheri');
+      } else if (combined.includes('سماواتی') || combined.includes('samavati')) {
+        matchedReciter = reciters.find((r) => r.id === 'rec-samavati');
+      } else if (combined.includes('بنی فاطمه') || combined.includes('banifatemeh')) {
+        matchedReciter = reciters.find((r) => r.id === 'rec-banifatemeh');
+      }
+    }
+
+    return {
+      channelName: detectedName || channelHandle || 'کانال یوتیوب',
+      channelHandle: channelHandle || channelUrlOrHandle,
+      channelUrl: rawUrl,
+      suggestedReciterId: matchedReciter?.id,
+      suggestedReciterName: matchedReciter?.name,
     };
   }
 
