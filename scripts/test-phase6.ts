@@ -27,7 +27,7 @@ async function runPhase6Tests() {
     duration: 100,
     status: 'published',
     created_at: new Date().toISOString(),
-  });
+  } as any);
 
   // تست ثبت درخواست حذف اثر (DMCA / Takedown Request)
   console.log('\n[1] تست درخواست حذف اثر (DMCA / Takedown):');

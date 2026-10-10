@@ -41,6 +41,7 @@ import {
   RotateCcw,
   Settings,
   Users,
+  Activity,
 } from 'lucide-react';
 import {
   Track,
@@ -56,6 +57,7 @@ import {
   AuthUser,
 } from '../../types';
 import { UserManager } from './UserManager';
+import { SystemHub } from './SystemHub';
 import { SourceManager } from './SourceManager';
 import { api } from '../../services/api';
 import { usePlayer } from '../../context/PlayerContext';
@@ -109,7 +111,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const { playTrack, currentTrack, isPlaying, togglePlay } = usePlayer();
 
   const [activeAdminTab, setActiveAdminTab] = useState<
-    'queue' | 'sources' | 'youtube_studio' | 'upload' | 'cloud_sync' | 'reciters' | 'categories' | 'telegram' | 'scripts' | 'settings' | 'users'
+    'queue' | 'sources' | 'youtube_studio' | 'upload' | 'cloud_sync' | 'reciters' | 'categories' | 'telegram' | 'scripts' | 'settings' | 'users' | 'system_hub'
   >('queue');
 
   // Telegram Bot states
@@ -1978,6 +1980,18 @@ USING (true);
             <span>مدیریت کاربران و دسترسی‌ها</span>
           </button>
         )}
+
+        <button
+          onClick={() => setActiveAdminTab('system_hub')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-medium whitespace-nowrap transition-all border ${
+            activeAdminTab === 'system_hub'
+              ? 'bg-emerald-600 text-white font-bold border-emerald-500 shadow-sm'
+              : 'bg-slate-900 text-slate-400 hover:text-slate-200 border-slate-800'
+          }`}
+        >
+          <Activity className="w-4 h-4 text-emerald-400" />
+          <span>پایش، بک‌آپ و مهاجرت</span>
+        </button>
       </div>
 
       {/* Tab 1: Review Queue (فایل‌های ارسال شده توسط ربات تلگرام) */}
@@ -4956,6 +4970,13 @@ CMD ["python", "telegram_scraper.py"]`}
       {activeAdminTab === 'users' && currentUser && (
         <div className="max-w-6xl mx-auto">
           <UserManager currentUser={currentUser} />
+        </div>
+      )}
+
+      {/* Tab: System Health, Backup & Migration (Phase 7) */}
+      {activeAdminTab === 'system_hub' && (
+        <div className="max-w-6xl mx-auto">
+          <SystemHub currentUser={currentUser} />
         </div>
       )}
 

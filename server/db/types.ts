@@ -218,6 +218,8 @@ export interface IUserRepo {
 export interface IAuditRepo {
   log(entry: Omit<AuditLog, 'id' | 'at'> & { id?: string; at?: string }): AuditLog;
   listRecent(limit?: number): AuditLog[];
+  filter(params: { actor_type?: string; action?: string; limit?: number }): AuditLog[];
+  deleteOlderThan(cutoffIsoDate: string): number;
 }
 
 export interface ISettingsRepo {

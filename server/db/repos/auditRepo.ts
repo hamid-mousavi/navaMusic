@@ -39,4 +39,30 @@ export class AuditRepo implements IAuditRepo {
     const stmt = db.prepare('SELECT * FROM audit_log ORDER BY at DESC LIMIT ?');
     return stmt.all(limit) as any[];
   }
+
+  filter(params: { actor_type?: string; action?: string; limit?: number }): AuditLog[] {
+    let sql = 'SELECT * FROM audit_log WHERE 1=1';
+    const args: any[] = [];
+
+    if (params.actor_type) {
+      sql += ' AND actor_type = ?';
+      args.push(params.actor_type);
+    }
+    if (params.action) {
+      sql += ' AND action LIKE ?';
+      args.push(`%${params.action}%`);
+    }
+
+    sql += ' ORDER BY at DESC LIMIT ?';
+    args.push(params.limit || 100);
+
+    const stmt = db.prepare(sql);
+    return stmt.all(...args) as any[];
+  }
+
+  deleteOlderThan(cutoffIsoDate: string): number {
+    const stmt = db.prepare('DELETE FROM audit_log WHERE at < ?');
+    const res = stmt.run(cutoffIsoDate);
+    return Number(res.changes);
+  }
 }

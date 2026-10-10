@@ -425,4 +425,86 @@ export const api = {
     const data = await res.json();
     if (!data.success) throw new Error(data.error || 'خطا در حذف کاربر');
   },
+
+  // ==========================================
+  // فاز ۷: پایش سلامت، بک‌آپ و مهاجرت Supabase
+  // ==========================================
+  async getSystemHealth(): Promise<any> {
+    const res = await fetch('/api/admin/system/health');
+    return await res.json();
+  },
+
+  async runSystemCleanup(options?: { stagingTtlDays?: number; auditRetentionDays?: number }): Promise<any> {
+    const res = await fetch('/api/admin/system/cleanup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(options || {}),
+    });
+    return await res.json();
+  },
+
+  async getBackups(): Promise<any[]> {
+    const res = await fetch('/api/admin/backups');
+    const data = await res.json();
+    return data.backups || [];
+  },
+
+  async createBackup(): Promise<any> {
+    const res = await fetch('/api/admin/backups', { method: 'POST' });
+    return await res.json();
+  },
+
+  async deleteBackup(filename: string): Promise<any> {
+    const res = await fetch(`/api/admin/backups/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    return await res.json();
+  },
+
+  async checkDatabaseIntegrity(): Promise<any> {
+    const res = await fetch('/api/admin/backups/integrity-check', { method: 'POST' });
+    return await res.json();
+  },
+
+  async getSupabaseSql(): Promise<string> {
+    const res = await fetch('/api/admin/migration/supabase-sql');
+    const data = await res.json();
+    return data.sql || '';
+  },
+
+  async testSupabaseConnection(config?: { projectUrl?: string; apiKey?: string }): Promise<any> {
+    const res = await fetch('/api/admin/migration/test-connection', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config || {}),
+    });
+    return await res.json();
+  },
+
+  async syncSupabase(config?: { projectUrl?: string; apiKey?: string }): Promise<any> {
+    const res = await fetch('/api/admin/migration/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config || {}),
+    });
+    return await res.json();
+  },
+
+  async getAuditLogs(params?: { actor_type?: string; action?: string; limit?: number }): Promise<any[]> {
+    const query = new URLSearchParams();
+    if (params?.actor_type) query.set('actor_type', params.actor_type);
+    if (params?.action) query.set('action', params.action);
+    if (params?.limit) query.set('limit', String(params.limit));
+
+    const res = await fetch(`/api/admin/audit?${query.toString()}`);
+    const data = await res.json();
+    return data.logs || [];
+  },
+
+  async cleanupAuditLogs(days = 60): Promise<any> {
+    const res = await fetch('/api/admin/audit/cleanup', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ days }),
+    });
+    return await res.json();
+  },
 };

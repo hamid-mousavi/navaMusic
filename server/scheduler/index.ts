@@ -6,12 +6,16 @@ import { Source, ScanJob } from '../db/types.js';
 import { sourceService } from '../services/sourceService.js';
 import { youtubeAdapter } from '../adapters/youtube.js';
 import { webAdapter } from '../adapters/webUrl/index.js';
+import { backupService } from '../services/backupService.js';
+import { systemHealthService } from '../services/systemHealthService.js';
 
 class Scheduler {
   private timer: NodeJS.Timeout | null = null;
   private runningSources = new Set<string>(); // قفل هر منبع حداکثر ۱ اسکن همزمان
   private activeConcurrency = 0; // حداکثر ۲ اسکن همزمان در کل سیستم
   private readonly MAX_CONCURRENT_SCANS = 2;
+  private lastMaintenanceAt = 0;
+  private readonly MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1000; // هر ۲۴ ساعت
 
   /**
    * شروع تایمر بررسی خودکار منابع سررسید شده
@@ -37,6 +41,20 @@ class Scheduler {
    */
   private async tick(): Promise<void> {
     try {
+      // ۱. بررسی اجرای نگهداری و پشتیبان‌گیری دوره‌ای (هر ۲۴ ساعت)
+      const now = Date.now();
+      if (now - this.lastMaintenanceAt > this.MAINTENANCE_INTERVAL_MS) {
+        this.lastMaintenanceAt = now;
+        try {
+          console.log('[Scheduler] Running daily automated maintenance & backup...');
+          backupService.createBackup('scheduler_daily');
+          systemHealthService.runSystemCleanup({ actor: 'scheduler_daily' });
+        } catch (mErr) {
+          console.error('[Scheduler] Error in daily maintenance:', mErr);
+        }
+      }
+
+      // ۲. اسکن منابع سررسید شده
       const dueSources = sourceService.getDueSources();
       for (const source of dueSources) {
         if (this.activeConcurrency >= this.MAX_CONCURRENT_SCANS) {

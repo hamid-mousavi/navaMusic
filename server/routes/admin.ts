@@ -21,6 +21,9 @@ import {
 } from '../db/repos/index.js';
 import { scheduler } from '../scheduler/index.js';
 import { localDb } from '../db.js';
+import { migrationService } from '../services/migrationService.js';
+import { backupService } from '../services/backupService.js';
+import { systemHealthService } from '../services/systemHealthService.js';
 
 const router = Router();
 
@@ -359,7 +362,21 @@ router.delete('/users/:id', requireRole('admin'), (req: AuthenticatedRequest, re
 
 router.get('/audit', requireRole('admin'), (req, res) => {
   const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
-  res.json({ success: true, logs: auditRepo.listRecent(limit) });
+  const actor_type = req.query.actor_type as string | undefined;
+  const action = req.query.action as string | undefined;
+
+  if (actor_type || action) {
+    res.json({ success: true, logs: auditRepo.filter({ actor_type, action, limit }) });
+  } else {
+    res.json({ success: true, logs: auditRepo.listRecent(limit) });
+  }
+});
+
+router.delete('/audit/cleanup', requireRole('admin'), (req: AuthenticatedRequest, res) => {
+  const days = req.body.days ? parseInt(req.body.days, 10) : 60;
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const deletedCount = auditRepo.deleteOlderThan(cutoff);
+  res.json({ success: true, deletedCount, message: `${deletedCount} رکورد لاگ قدیمی پاکسازی شد.` });
 });
 
 router.get('/health', requireRole('reviewer'), (req, res) => {
@@ -401,6 +418,139 @@ router.post('/takedowns/:id/resolve', requireRole('admin'), (req: AuthenticatedR
 router.post('/takedowns/:id/reject', requireRole('admin'), (req: AuthenticatedRequest, res) => {
   takedownRepo.updateStatus(req.params.id, 'rejected');
   res.json({ success: true, message: 'درخواست رد گردید.' });
+});
+
+// ==========================================
+// ۷. مهاجرت به Supabase و PostgreSQL (Migration - فاز ۷)
+// ==========================================
+
+router.get('/migration/supabase-sql', requireRole('admin'), (req, res) => {
+  try {
+    const sql = migrationService.generateSupabaseSqlDump();
+    const isDownload = req.query.download === 'true';
+
+    if (isDownload) {
+      const filename = `nava_supabase_migration_${new Date().toISOString().slice(0, 10)}.sql`;
+      res.setHeader('Content-Type', 'application/sql; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      return res.send(sql);
+    }
+
+    res.json({ success: true, sql, length: sql.length });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/migration/test-connection', requireRole('admin'), async (req, res) => {
+  try {
+    const { projectUrl, apiKey } = req.body || {};
+    const result = await migrationService.testSupabaseConnection({ projectUrl, apiKey });
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/migration/sync', requireRole('admin'), async (req: AuthenticatedRequest, res) => {
+  try {
+    const { projectUrl, apiKey } = req.body || {};
+    const result = await migrationService.syncToSupabase({ projectUrl, apiKey });
+    auditRepo.log({
+      actor_type: 'web',
+      actor_id: req.user?.userId || null,
+      action: 'supabase_sync_executed',
+      entity: 'migration',
+      entity_id: null,
+      meta_json: JSON.stringify(result.syncedCounts),
+    });
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ==========================================
+// ۸. مدیریت نسخه‌های پشتیبان (Backups & Integrity - فاز ۷)
+// ==========================================
+
+router.get('/backups', requireRole('reviewer'), (req, res) => {
+  try {
+    const backups = backupService.listBackups();
+    res.json({ success: true, backups });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/backups', requireRole('admin'), (req: AuthenticatedRequest, res) => {
+  try {
+    const result = backupService.createBackup(req.user?.username || 'admin');
+    res.json({
+      success: true,
+      message: 'نسخه پشتیبان با موفقیت ایجاد شد.',
+      ...result,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/backups/:filename/download', requireRole('reviewer'), (req, res) => {
+  const filePath = backupService.getBackupFilePath(req.params.filename);
+  if (!filePath) {
+    return res.status(404).json({ success: false, error: 'فایل پشتیبان یافت نشد.' });
+  }
+
+  res.download(filePath, req.params.filename);
+});
+
+router.delete('/backups/:filename', requireRole('admin'), (req: AuthenticatedRequest, res) => {
+  const ok = backupService.deleteBackup(req.params.filename, req.user?.username || 'admin');
+  if (!ok) {
+    return res.status(404).json({ success: false, error: 'فایل پشتیبان یافت نشد.' });
+  }
+  res.json({ success: true, message: 'فایل پشتیبان حذف شد.' });
+});
+
+router.post('/backups/integrity-check', requireRole('reviewer'), (req, res) => {
+  try {
+    const result = backupService.checkIntegrity();
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ==========================================
+// ۹. رصد و سلامت جامع سیستم (System Health & Observability - فاز ۷)
+// ==========================================
+
+router.get('/system/health', requireRole('reviewer'), (req, res) => {
+  try {
+    const health = systemHealthService.getComprehensiveHealth();
+    res.json(health);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/system/cleanup', requireRole('admin'), (req: AuthenticatedRequest, res) => {
+  try {
+    const { stagingTtlDays, auditRetentionDays } = req.body || {};
+    const result = systemHealthService.runSystemCleanup({
+      stagingTtlDays,
+      auditRetentionDays,
+      actor: req.user?.username || 'admin',
+    });
+    res.json({
+      success: true,
+      message: 'عملیات پاکسازی و بهینه‌سازی سامانه با موفقیت انجام شد.',
+      ...result,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 export default router;
