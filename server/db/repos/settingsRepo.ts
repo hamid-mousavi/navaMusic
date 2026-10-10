@@ -21,6 +21,20 @@ export class SettingsRepo implements ISettingsRepo {
     stmt.run(key, value);
   }
 
+  getJson<T>(key: string): T | null {
+    const val = this.get(key);
+    if (!val) return null;
+    try {
+      return JSON.parse(val) as T;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  setJson(key: string, value: any): void {
+    this.set(key, JSON.stringify(value));
+  }
+
   getAll(): Record<string, string> {
     const stmt = db.prepare('SELECT key, value FROM settings');
     const rows = stmt.all() as any[];

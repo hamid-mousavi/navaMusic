@@ -2,18 +2,24 @@
 // مسیرهای مدیریت و کنترل دسترسی بر پایه نقش‌ها (RBAC)
 
 import { Router } from 'express';
+import fs from 'fs';
 import { z } from 'zod';
 import { authService, hashPassword } from '../services/authService.js';
+import { candidateService } from '../services/candidateService.js';
+import { storageService } from '../services/storageService.js';
 import { requireAuth, requireRole, AuthenticatedRequest } from '../middleware/auth.js';
 import {
   trackRepo,
   sourceRepo,
+  scanJobRepo,
   reciterRepo,
   categoryRepo,
   userRepo,
   auditRepo,
   settingsRepo,
+  takedownRepo,
 } from '../db/repos/index.js';
+import { scheduler } from '../scheduler/index.js';
 import { localDb } from '../db.js';
 
 const router = Router();
@@ -114,6 +120,20 @@ router.get('/candidates/:id', requireRole('reviewer'), (req, res) => {
   res.json({ success: true, track });
 });
 
+// مسیر پیش‌نمایش استریم صوت از استیجینگ با Range Header
+router.get('/candidates/:id/preview', (req, res) => {
+  const track = trackRepo.findById(req.params.id);
+  if (!track) return res.status(404).json({ success: false, error: 'کاندید یافت نشد.' });
+
+  if (track.staging_path && fs.existsSync(track.staging_path)) {
+    storageService.streamStagingFile(track.staging_path, req, res);
+  } else if (track.audio_url) {
+    res.redirect(track.audio_url);
+  } else {
+    res.status(404).json({ success: false, error: 'فایل صوتی جهت پیش‌نمایش یافت نشد.' });
+  }
+});
+
 router.patch('/candidates/:id', requireRole('reviewer'), (req: AuthenticatedRequest, res) => {
   try {
     const updated = trackRepo.update(req.params.id, req.body);
@@ -134,76 +154,42 @@ router.patch('/candidates/:id', requireRole('reviewer'), (req: AuthenticatedRequ
   }
 });
 
-router.post('/candidates/:id/approve', requireRole('reviewer'), (req: AuthenticatedRequest, res) => {
+router.post('/candidates/:id/approve', requireRole('reviewer'), async (req: AuthenticatedRequest, res) => {
   try {
-    const existing = trackRepo.findById(req.params.id);
-    if (!existing) return res.status(404).json({ success: false, error: 'کاندید یافت نشد.' });
-
-    if (existing.status === 'published') {
-      return res.status(400).json({ success: false, error: 'این اثر قبلاً منتشر شده است.' });
-    }
-
-    const updated = trackRepo.update(req.params.id, {
-      status: 'published',
-      published_at: new Date().toISOString(),
-      reviewed_by: req.user?.username || 'reviewer',
-      reviewed_at: new Date().toISOString(),
+    const updated = await candidateService.approve(req.params.id, {
       ...req.body,
+      actor: req.user?.username || 'reviewer',
     });
-
-    if (existing.reciter_id) reciterRepo.updateTracksCount(existing.reciter_id, +1);
-    if (existing.category_id) categoryRepo.updateTracksCount(existing.category_id, +1);
-    categoryRepo.updateTracksCount('cat-all', +1);
-
-    auditRepo.log({
-      actor_type: 'web',
-      actor_id: req.user?.userId || null,
-      action: 'candidate_approved',
-      entity: 'tracks',
-      entity_id: req.params.id,
-      meta_json: JSON.stringify({ reviewer: req.user?.username }),
-    });
-
     res.json({ success: true, track: updated, message: 'اثر با موفقیت تأیید و منتشر شد.' });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-router.post('/candidates/:id/reject', requireRole('reviewer'), (req: AuthenticatedRequest, res) => {
+router.post('/candidates/:id/reject', requireRole('reviewer'), async (req: AuthenticatedRequest, res) => {
   try {
     const reason = req.body.reason || 'رد توسط مدیر';
-    const updated = trackRepo.update(req.params.id, {
-      status: 'rejected',
-      reject_reason: reason,
-      reviewed_by: req.user?.username || 'reviewer',
-      reviewed_at: new Date().toISOString(),
-    });
-
-    auditRepo.log({
-      actor_type: 'web',
-      actor_id: req.user?.userId || null,
-      action: 'candidate_rejected',
-      entity: 'tracks',
-      entity_id: req.params.id,
-      meta_json: JSON.stringify({ reason }),
-    });
-
+    const updated = await candidateService.reject(
+      req.params.id,
+      reason,
+      req.user?.username || 'reviewer'
+    );
     res.json({ success: true, track: updated, message: 'کاندید با موفقیت رد شد.' });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-router.post('/candidates/:id/retry-upload', requireRole('reviewer'), (req: AuthenticatedRequest, res) => {
-  const existing = trackRepo.findById(req.params.id);
-  if (!existing) return res.status(404).json({ success: false, error: 'کاندید یافت نشد.' });
-
-  const updated = trackRepo.update(req.params.id, {
-    status: 'uploading',
-  });
-
-  res.json({ success: true, track: updated, message: 'فرآیند تلاش مجدد آپلود آغاز گردید.' });
+router.post('/candidates/:id/retry-upload', requireRole('reviewer'), async (req: AuthenticatedRequest, res) => {
+  try {
+    const updated = await candidateService.retryUpload(
+      req.params.id,
+      req.user?.username || 'reviewer'
+    );
+    res.json({ success: true, track: updated, message: 'فرآیند تلاش مجدد آپلود با موفقیت انجام شد.' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // ==========================================
@@ -269,6 +255,29 @@ router.delete('/sources/:id', requireRole('admin'), (req: AuthenticatedRequest, 
     meta_json: '{}',
   });
   res.json({ success: ok, message: ok ? 'منبع حذف شد.' : 'منبع یافت نشد.' });
+});
+
+router.post('/sources/:id/scan', requireRole('admin'), async (req: AuthenticatedRequest, res) => {
+  try {
+    const job = await scheduler.scanSource(req.params.id, 'manual');
+    res.json({ success: true, job, message: 'اسکن منبع با موفقیت آغاز شد.' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/scan-all', requireRole('admin'), async (req: AuthenticatedRequest, res) => {
+  try {
+    scheduler.scanAllDue().catch((e) => console.error('[Admin] Scan all error:', e));
+    res.json({ success: true, message: 'فرآیند اسکن تمامی منابع سررسید شده در پس‌زمینه آغاز گردید.' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/jobs', requireRole('reviewer'), (req, res) => {
+  const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+  res.json({ success: true, jobs: scanJobRepo.findAll(limit) });
 });
 
 // ==========================================
@@ -362,6 +371,36 @@ router.get('/health', requireRole('reviewer'), (req, res) => {
     publishedTracksCount: trackRepo.listPublished().total,
     pendingCandidatesCount: trackRepo.countByStatus('pending'),
   });
+});
+
+// ==========================================
+// ۶. مدیریت درخواست‌های حذف اثر (Takedowns)
+// ==========================================
+
+router.get('/takedowns', requireRole('reviewer'), (req, res) => {
+  res.json({ success: true, requests: takedownRepo.findAll(100) });
+});
+
+router.post('/takedowns/:id/resolve', requireRole('admin'), (req: AuthenticatedRequest, res) => {
+  const reqObj = takedownRepo.findById(req.params.id);
+  if (!reqObj) return res.status(404).json({ success: false, error: 'درخواست یافت نشد.' });
+
+  takedownRepo.updateStatus(req.params.id, 'resolved');
+  auditRepo.log({
+    actor_type: 'web',
+    actor_id: req.user?.userId || null,
+    action: 'takedown_resolved',
+    entity: 'takedowns',
+    entity_id: req.params.id,
+    meta_json: JSON.stringify({ trackId: reqObj.track_id }),
+  });
+
+  res.json({ success: true, message: 'درخواست حذف اثر تأیید و مختومه شد.' });
+});
+
+router.post('/takedowns/:id/reject', requireRole('admin'), (req: AuthenticatedRequest, res) => {
+  takedownRepo.updateStatus(req.params.id, 'rejected');
+  res.json({ success: true, message: 'درخواست رد گردید.' });
 });
 
 export default router;

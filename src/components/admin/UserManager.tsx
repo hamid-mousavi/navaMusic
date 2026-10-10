@@ -5,6 +5,7 @@ import React, { useState, useEffect } from 'react';
 import { Users, UserPlus, Trash2, Shield, Eye, Send, AlertCircle, CheckCircle } from 'lucide-react';
 import { api } from '../../services/api';
 import { AuthUser } from '../../types';
+import { TakedownManager } from './TakedownManager';
 
 interface UserManagerProps {
   currentUser: AuthUser;
@@ -250,6 +251,9 @@ export const UserManager: React.FC<UserManagerProps> = ({ currentUser }) => {
           </div>
         </div>
       </div>
+
+      {/* بخش مدیریت درخواست‌های حذف اثر */}
+      <TakedownManager />
     </div>
   );
 };

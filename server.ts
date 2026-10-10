@@ -24,8 +24,13 @@ import {
 } from './server/telegram.js';
 import { youtubeMonitor } from './server/youtubeMonitor.js';
 import { authService } from './server/services/authService.js';
+import { candidateService } from './server/services/candidateService.js';
+import { trackRepo } from './server/db/repos/index.js';
 import publicRoutes from './server/routes/public.js';
 import adminRoutes from './server/routes/admin.js';
+import internalRoutes from './server/routes/internal.js';
+import { scheduler } from './server/scheduler/index.js';
+import { botService } from './server/bot/botService.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -33,6 +38,9 @@ dotenv.config();
 
 // ایجاد ادمین اولیه در صورت نیاز (Bootstrap Admin)
 authService.initBootstrapAdmin();
+
+// راه‌اندازی زمان‌بند درون‌پروسه‌ای برای اسکن دوره‌ای منابع
+scheduler.start(60000);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -46,6 +54,25 @@ app.use(cookieParser());
 // مسیرهای استاندارد تفکیک‌شده معماری جدید
 app.use('/api/public', publicRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/internal', internalRoutes);
+
+// وب‌هوک رسمی ربات تلگرام
+app.post('/api/bot/webhook', async (req, res) => {
+  try {
+    const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+    if (secret) {
+      const headerSecret = req.headers['x-telegram-bot-api-secret-token'];
+      if (headerSecret !== secret) {
+        return res.status(403).json({ error: 'Invalid secret token' });
+      }
+    }
+    await botService.processUpdate(req.body);
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error('[BotWebhook] Error handling update:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // In-memory buffer for uploaded files (up to 100MB)
 const storage = multer.memoryStorage();
@@ -844,7 +871,7 @@ app.post('/api/youtube/monitor/toggle', (req, res) => {
   res.json({ success: true, status: youtubeMonitor.getStatus() });
 });
 
-// API: Real Upload to ArvanCloud S3
+// API: Upload to Staging & Queue as Candidate (Phase 3 Staging Pipeline)
 app.post('/api/upload', upload.single('file') as any, async (req, res) => {
   try {
     const file = req.file;
@@ -852,88 +879,75 @@ app.post('/api/upload', upload.single('file') as any, async (req, res) => {
       return res.status(400).json({ error: 'هیچ فایلی برای آپلود انتخاب نشده است.' });
     }
 
-    const s3 = getS3Client();
-    if (!s3) {
-      return res.status(400).json({
-        error:
-          'کلیدهای استوریج ابر آروان تنظیم نشده‌اند! لطفاً در تب «فضای ابری و استوریج» کلیدهای ARVAN_ACCESS_KEY و ARVAN_SECRET_KEY را وارد کرده و دکمه ذخیره و تست را بزنید.',
-      });
-    }
-
-    const bucketName = activeArvanConfig.bucketName;
-    const timestamp = Date.now();
-    const cleanFileName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const s3Key = `audio/${new Date().toISOString().slice(0, 7)}/${timestamp}_${cleanFileName}`;
-    const fileSizeMb = parseFloat((file.size / (1024 * 1024)).toFixed(2));
-
-    // Upload to ArvanCloud S3
-    const command = new PutObjectCommand({
-      Bucket: bucketName,
-      Key: s3Key,
-      Body: file.buffer,
-      ContentType: file.mimetype || 'audio/mpeg',
-      CacheControl: 'public, max-age=31536000',
-      ACL: 'public-read',
-    });
-
-    await s3.send(command);
-
-    const publicUrl = resolvePublicUrl(s3Key);
-
     const reciterId = req.body?.reciterId || 'rec-karimi';
     const reciterObj = localDb.getReciters().find((r) => r.id === reciterId);
     const reciterName = reciterObj?.name || req.body?.reciterName || 'حاج محمود کریمی';
     const categoryId = req.body?.categoryId || 'cat-moharram';
     const categoryObj = localDb.getCategories().find((c) => c.id === categoryId);
     const categoryName = categoryObj?.name || req.body?.categoryName || 'محرم و عاشورا';
-    const trackTitle = (req.body?.title && String(req.body.title).trim()) || file.originalname.replace(/\.[^/.]+$/, '');
+    const trackTitle =
+      (req.body?.title && String(req.body.title).trim()) ||
+      file.originalname.replace(/\.[^/.]+$/, '');
 
-    const newQueueItem = localDb.addToQueue({
-      id: `queue-${Date.now()}`,
+    // جریان جدید (D4): ذخیره در Staging محلی، پردازش با ffmpeg و ثبت کاندید در صف
+    const candidate = await candidateService.ingest({
+      buffer: file.buffer,
       title: trackTitle,
+      sourceType: 'manual_upload',
+      reciterId,
+      categoryId,
+      occasion: req.body?.occasion || 'مداحی و مراثی',
+      tags: ['آپلود فایل', reciterName],
+      actor: 'web_upload',
+    });
+
+    const previewUrl = `/api/admin/candidates/${candidate.id}/preview`;
+
+    const queueItem = {
+      id: candidate.id,
+      title: candidate.title,
       reciterId,
       reciterName,
       categoryId,
       categoryName,
-      duration: Number(req.body?.duration) || 240,
-      audioUrl: publicUrl,
-      coverUrl: req.body?.coverUrl || '',
-      fileSizeMb,
-      bitrate: '320 kbps',
+      duration: candidate.duration,
+      audioUrl: previewUrl,
+      coverUrl: candidate.cover_url || '',
+      fileSizeMb: candidate.file_size,
+      bitrate: candidate.bitrate,
       lyrics: [],
       status: 'pending',
       sourceType: 'manual_upload',
       playCount: 0,
-      createdAt: 'همین الان (آپلود فایل)',
-      s3Key,
+      createdAt: 'همین الان (استیجینگ)',
+      s3Key: '',
       tags: ['آپلود فایل', reciterName],
-    });
+    };
 
     localDb.addLog({
       id: `log-${Date.now()}`,
       timestamp: new Date().toLocaleTimeString('fa-IR'),
-      channel: 'آپلود فایل',
-      message: `فایل صوتی «${trackTitle}» با موفقیت آپلود و در صف بررسی ثبت شد.`,
+      channel: 'استیجینگ و صف',
+      message: `فایل صوتی «${trackTitle}» در استیجینگ ذخیره و به عنوان کاندید در صف ثبت شد.`,
       level: 'success',
     });
 
     return res.json({
       success: true,
-      realUpload: true,
-      url: publicUrl,
-      s3Key,
-      fileSizeMb,
+      realUpload: false,
+      isCandidate: true,
+      url: previewUrl,
+      s3Key: '',
+      fileSizeMb: candidate.file_size,
       fileName: file.originalname,
-      queueItem: newQueueItem,
-      message: `فایل صوتی با موفقیت در باکت «${bucketName}» ابر آروان آپلود و در صف بررسی ذخیره گردید.`,
+      queueItem,
+      message: 'فایل با موفقیت به استیجینگ محلی منتقل شد و در صف بررسی کاندیدها قرار گرفت (آپلود به ابر آروان پس از تأیید انجام می‌شود).',
     });
   } catch (error: any) {
     console.error('Upload Error:', error);
-    const friendlyError = translateS3Error(error);
     return res.status(500).json({
-      error: `خطا در آپلود به ابر آروان: ${friendlyError}`,
-      code: error.name || 'UPLOAD_ERROR',
-      details: error.message || String(error),
+      error: `خطا در پردازش رسانه و ذخیره در استیجینگ: ${error.message}`,
+      code: 'INGEST_ERROR',
     });
   }
 });
@@ -1419,7 +1433,23 @@ app.delete('/api/queue/:id', (req, res) => {
 app.post('/api/queue/:id/approve', async (req, res) => {
   try {
     const { overrides, publishToTelegram, track: payloadTrack } = req.body || {};
-    const approved = localDb.approveQueueItemWithFallback(req.params.id, overrides, payloadTrack);
+    let approved: any = null;
+
+    // در صورت وجود فایل استیجینگ، اجرای فرآیند استاندارد آپلود در آروان
+    const candidate = trackRepo.findById(req.params.id);
+    if (candidate && candidate.staging_path) {
+      try {
+        const publishedSql = await candidateService.approve(req.params.id, overrides);
+        approved = localDb.getTracks().find((t) => t.id === req.params.id) || publishedSql;
+      } catch (uploadErr: any) {
+        return res.status(500).json({
+          success: false,
+          error: `خطا در آپلود اثر به ابر آروان: ${uploadErr.message}. قطعه با وضعیت «شکست آپلود» علامت‌گذاری شد.`,
+        });
+      }
+    } else {
+      approved = localDb.approveQueueItemWithFallback(req.params.id, overrides, payloadTrack);
+    }
 
     if (!approved) {
       return res.status(404).json({ error: 'آیتم مورد نظر در صف یافت نشد.' });

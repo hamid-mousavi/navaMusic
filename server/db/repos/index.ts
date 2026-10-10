@@ -7,6 +7,7 @@ import { ScanJobRepo } from './jobRepo.js';
 import { UserRepo } from './userRepo.js';
 import { AuditRepo } from './auditRepo.js';
 import { SettingsRepo } from './settingsRepo.js';
+import { TakedownRepo } from './takedownRepo.js';
 
 export const trackRepo = new TrackRepo();
 export const reciterRepo = new ReciterRepo();
@@ -16,6 +17,7 @@ export const scanJobRepo = new ScanJobRepo();
 export const userRepo = new UserRepo();
 export const auditRepo = new AuditRepo();
 export const settingsRepo = new SettingsRepo();
+export const takedownRepo = new TakedownRepo();
 
 export * from './trackRepo.js';
 export * from './reciterRepo.js';
@@ -25,3 +27,4 @@ export * from './jobRepo.js';
 export * from './userRepo.js';
 export * from './auditRepo.js';
 export * from './settingsRepo.js';
+export * from './takedownRepo.js';

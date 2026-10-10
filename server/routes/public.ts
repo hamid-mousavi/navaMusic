@@ -2,10 +2,13 @@
 // مسیرهای عمومی پلیر و دسترسی آزاد کاربران بدون نیاز به احراز هویت
 
 import { Router } from 'express';
-import { trackRepo, reciterRepo, categoryRepo } from '../db/repos/index.js';
+import multer from 'multer';
+import { trackRepo, reciterRepo, categoryRepo, takedownRepo, auditRepo } from '../db/repos/index.js';
+import { candidateService } from '../services/candidateService.js';
 import { db } from '../db/index.js';
 
 const router = Router();
+const upload = multer({ limits: { fileSize: 50 * 1024 * 1024 } }); // سقف ۵۰ مگابایت برای کاربران عمومی
 
 // ۱. دریافت فهرست آثار منتشر شده با جستجو و فیلتر
 router.get('/tracks', (req, res) => {
@@ -134,27 +137,76 @@ router.post('/tracks/:id/play', (req, res) => {
   }
 });
 
-// ۶. ثبت درخواست حذف اثر (Takedown Request)
+// ۶. ثبت درخواست حذف اثر (DMCA / Takedown Request)
 router.post('/takedown', (req, res) => {
   try {
-    const { trackId, requesterContact, reason } = req.body;
-    if (!trackId || !requesterContact || !reason) {
+    const { trackId, requesterName, requesterEmail, requesterContact, reason } = req.body;
+    if (!trackId || !reason) {
       return res.status(400).json({
         success: false,
-        error: 'شناسه اثر، اطلاعات تماس و دلیل درخواست الزامی است.',
+        error: 'شناسه اثر و دلیل درخواست الزامی است.',
       });
     }
 
-    const id = `td-${Date.now()}`;
-    const stmt = db.prepare(`
-      INSERT INTO takedown_requests (id, track_id, requester_contact, reason, status, created_at)
-      VALUES (?, ?, ?, ?, 'pending', ?)
-    `);
-    stmt.run(id, trackId, requesterContact, reason, new Date().toISOString());
+    const id = `td-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const email = requesterEmail || requesterContact || '';
+    const name = requesterName || 'مخاطب عمومی';
+
+    const request = takedownRepo.create({
+      id,
+      track_id: trackId,
+      requester_name: name,
+      requester_email: email,
+      reason: reason.trim(),
+      status: 'pending',
+    });
+
+    auditRepo.log({
+      actor_type: 'web',
+      actor_id: null,
+      action: 'takedown_requested',
+      entity: 'tracks',
+      entity_id: trackId,
+      meta_json: JSON.stringify({ requestId: id, requester: name, reason }),
+    });
 
     res.json({
       success: true,
-      message: 'درخواست حذف اثر ثبت شد و توسط تیم بررسی خواهد گردید.',
+      requestId: id,
+      message: 'درخواست حذف اثر ثبت شد و توسط مدیران بررسی خواهد گردید.',
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ۷. ارسال اثر پیشنهادی توسط مخاطبان عمومی (Public Submission)
+router.post('/submit', upload.single('audio') as any, async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file) {
+      return res.status(400).json({ success: false, error: 'فایل صوتی جهت ارسال انتخاب نشده است.' });
+    }
+
+    const { title, reciterName, categoryId, note } = req.body;
+    if (!title || !title.trim()) {
+      return res.status(400).json({ success: false, error: 'عنوان اثر الزامی است.' });
+    }
+
+    const candidate = await candidateService.ingest({
+      buffer: file.buffer,
+      title: title.trim(),
+      sourceType: 'user_submission',
+      sourceOwnerName: reciterName || 'پیشنهاد کاربران',
+      categoryId: categoryId || undefined,
+      tags: ['پیشنهاد مخاطب'],
+      actor: 'public_visitor',
+    });
+
+    res.json({
+      success: true,
+      candidateId: candidate.id,
+      message: 'نوا با موفقیت دریافت شد و پس از بررسی در سامانه منتشر خواهد گردید. با سپاس از مشارکت شما.',
     });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });

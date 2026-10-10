@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Search,
   Play,
@@ -17,10 +17,14 @@ import {
   Clock,
   Radio,
   SlidersHorizontal,
+  UploadCloud,
+  ShieldAlert,
 } from 'lucide-react';
 import { Track, Category, Reciter } from '../../types';
 import { usePlayer } from '../../context/PlayerContext';
 import { formatDuration, toPersianDigits, formatFileSize } from '../../utils/formatters';
+import { SubmitTrackModal } from './SubmitTrackModal';
+import { TakedownModal } from './TakedownModal';
 
 interface UserViewProps {
   tracks: Track[];
@@ -46,7 +50,21 @@ export const UserView: React.FC<UserViewProps> = ({
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [selectedReciterId, setSelectedReciterId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState<string>('');
   const [showOnlyFavorites, setShowOnlyFavorites] = useState<boolean>(false);
+
+  // Modal states for submission and takedown
+  const [isSubmitModalOpen, setIsSubmitModalOpen] = useState(false);
+  const [isTakedownModalOpen, setIsTakedownModalOpen] = useState(false);
+  const [takedownTrack, setTakedownTrack] = useState<Track | null>(null);
+
+  // Debounce search input for silky-smooth responsiveness
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery);
+    }, 250);
+    return () => clearTimeout(handler);
+  }, [searchQuery]);
 
   // Filtered tracks
   const filteredTracks = useMemo(() => {
@@ -70,8 +88,8 @@ export const UserView: React.FC<UserViewProps> = ({
       }
 
       // Search query
-      if (searchQuery.trim()) {
-        const query = searchQuery.toLowerCase().trim();
+      if (debouncedSearchQuery.trim()) {
+        const query = debouncedSearchQuery.toLowerCase().trim();
         const matchesTitle = track.title.toLowerCase().includes(query);
         const matchesReciter = track.reciterName.toLowerCase().includes(query);
         const matchesOccasion = track.occasion?.toLowerCase().includes(query);
@@ -88,7 +106,7 @@ export const UserView: React.FC<UserViewProps> = ({
 
       return true;
     });
-  }, [tracks, selectedCategory, selectedReciterId, showOnlyFavorites, searchQuery, favorites]);
+  }, [tracks, selectedCategory, selectedReciterId, showOnlyFavorites, debouncedSearchQuery, favorites]);
 
   // Featured track for Hero spotlight
   const featuredTrack = tracks[0] || null;
@@ -228,6 +246,14 @@ export const UserView: React.FC<UserViewProps> = ({
                 {toPersianDigits(favorites.length)}
               </span>
             )}
+          </button>
+
+          <button
+            onClick={() => setIsSubmitModalOpen(true)}
+            className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs sm:text-sm transition-all shadow-md shadow-emerald-500/10 whitespace-nowrap"
+          >
+            <UploadCloud className="w-4 h-4" />
+            <span>پیشنهاد اثر</span>
           </button>
         </div>
       </div>
@@ -445,6 +471,18 @@ export const UserView: React.FC<UserViewProps> = ({
                     >
                       <Layers className="w-4 h-4" />
                     </button>
+
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setTakedownTrack(track);
+                        setIsTakedownModalOpen(true);
+                      }}
+                      title="گزارش یا درخواست حذف اثر"
+                      className="p-2 text-slate-600 hover:text-rose-400 rounded-lg transition-colors"
+                    >
+                      <ShieldAlert className="w-4 h-4" />
+                    </button>
                   </div>
                 </div>
               );
@@ -452,6 +490,48 @@ export const UserView: React.FC<UserViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Footer & DMCA Notice */}
+      <footer className="pt-8 pb-4 text-center border-t border-slate-900 text-xs text-slate-500 space-y-2">
+        <p>
+          سامانه «نوای آسمانی» — پلتفرم جامع انتشار مراثی، مداحی و ادعیه متصل به فضای ابری
+        </p>
+        <div className="flex items-center justify-center gap-4 text-[11px]">
+          <button
+            onClick={() => {
+              setTakedownTrack(null);
+              setIsTakedownModalOpen(true);
+            }}
+            className="text-slate-400 hover:text-rose-400 transition-colors underline"
+          >
+            گزارش تخلف و درخواست حذف اثر (DMCA / Takedown)
+          </button>
+          <span>·</span>
+          <button
+            onClick={() => setIsSubmitModalOpen(true)}
+            className="text-slate-400 hover:text-emerald-400 transition-colors underline"
+          >
+            ارسال و پیشنهاد اثر جدید
+          </button>
+        </div>
+      </footer>
+
+      {/* Modals */}
+      <SubmitTrackModal
+        isOpen={isSubmitModalOpen}
+        onClose={() => setIsSubmitModalOpen(false)}
+        categories={categories}
+        reciters={reciters}
+      />
+
+      <TakedownModal
+        isOpen={isTakedownModalOpen}
+        onClose={() => {
+          setIsTakedownModalOpen(false);
+          setTakedownTrack(null);
+        }}
+        selectedTrack={takedownTrack}
+      />
     </div>
   );
 };

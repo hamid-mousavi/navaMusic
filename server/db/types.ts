@@ -136,7 +136,9 @@ export interface AuditLog {
 export interface TakedownRequest {
   id: string;
   track_id: string;
-  requester_contact: string;
+  requester_name?: string | null;
+  requester_email?: string | null;
+  requester_contact?: string | null;
   reason: string;
   status: 'pending' | 'reviewed' | 'resolved' | 'rejected';
   created_at: string;
@@ -221,5 +223,7 @@ export interface IAuditRepo {
 export interface ISettingsRepo {
   get(key: string, defaultValue?: string): string | null;
   set(key: string, value: string): void;
+  getJson<T>(key: string): T | null;
+  setJson(key: string, value: any): void;
   getAll(): Record<string, string>;
 }

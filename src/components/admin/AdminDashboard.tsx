@@ -56,6 +56,7 @@ import {
   AuthUser,
 } from '../../types';
 import { UserManager } from './UserManager';
+import { SourceManager } from './SourceManager';
 import { api } from '../../services/api';
 import { usePlayer } from '../../context/PlayerContext';
 import { formatDuration, toPersianDigits, formatFileSize } from '../../utils/formatters';
@@ -108,7 +109,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const { playTrack, currentTrack, isPlaying, togglePlay } = usePlayer();
 
   const [activeAdminTab, setActiveAdminTab] = useState<
-    'queue' | 'youtube_studio' | 'upload' | 'cloud_sync' | 'reciters' | 'categories' | 'telegram' | 'scripts' | 'settings' | 'users'
+    'queue' | 'sources' | 'youtube_studio' | 'upload' | 'cloud_sync' | 'reciters' | 'categories' | 'telegram' | 'scripts' | 'settings' | 'users'
   >('queue');
 
   // Telegram Bot states
@@ -1834,6 +1835,18 @@ USING (true);
         </button>
 
         <button
+          onClick={() => setActiveAdminTab('sources')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-medium whitespace-nowrap transition-all border ${
+            activeAdminTab === 'sources'
+              ? 'bg-indigo-600 text-white font-bold border-indigo-500 shadow-sm'
+              : 'bg-slate-900 text-slate-400 hover:text-slate-200 border-slate-800'
+          }`}
+        >
+          <Globe className="w-4 h-4 text-indigo-400" />
+          <span>منابع و زمان‌بندی اسکن</span>
+        </button>
+
+        <button
           onClick={() => setActiveAdminTab('youtube_studio')}
           className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-medium whitespace-nowrap transition-all border ${
             activeAdminTab === 'youtube_studio'
@@ -2142,6 +2155,15 @@ USING (true);
             </div>
           )}
         </div>
+      )}
+
+      {/* Tab: Unified Sources & Scan Jobs (Phase 4) */}
+      {activeAdminTab === 'sources' && currentUser && (
+        <SourceManager
+          currentUser={currentUser}
+          reciters={reciters}
+          categories={categories}
+        />
       )}
 
       {/* Tab: YouTube & Web Studio (استودیو یوتیوب و سورس‌های وب) */}
