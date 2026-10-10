@@ -40,6 +40,7 @@ import {
   MessageSquare,
   RotateCcw,
   Settings,
+  Users,
 } from 'lucide-react';
 import {
   Track,
@@ -52,12 +53,15 @@ import {
   SupabaseConfig,
   ScraperLog,
   BotConfig,
+  AuthUser,
 } from '../../types';
+import { UserManager } from './UserManager';
 import { api } from '../../services/api';
 import { usePlayer } from '../../context/PlayerContext';
 import { formatDuration, toPersianDigits, formatFileSize } from '../../utils/formatters';
 
 interface AdminDashboardProps {
+  currentUser?: AuthUser | null;
   tracks: Track[];
   setTracks: React.Dispatch<React.SetStateAction<Track[]>>;
   pendingQueue: Track[];
@@ -80,6 +84,7 @@ interface AdminDashboardProps {
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
+  currentUser,
   tracks,
   setTracks,
   pendingQueue,
@@ -103,7 +108,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const { playTrack, currentTrack, isPlaying, togglePlay } = usePlayer();
 
   const [activeAdminTab, setActiveAdminTab] = useState<
-    'queue' | 'youtube_studio' | 'upload' | 'cloud_sync' | 'reciters' | 'categories' | 'telegram' | 'scripts' | 'settings'
+    'queue' | 'youtube_studio' | 'upload' | 'cloud_sync' | 'reciters' | 'categories' | 'telegram' | 'scripts' | 'settings' | 'users'
   >('queue');
 
   // Telegram Bot states
@@ -1946,6 +1951,20 @@ USING (true);
             <span className="w-2 h-2 rounded-full bg-emerald-400" title="کوکی تنظیم شده"></span>
           )}
         </button>
+
+        {currentUser?.role === 'admin' && (
+          <button
+            onClick={() => setActiveAdminTab('users')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-medium whitespace-nowrap transition-all border ${
+              activeAdminTab === 'users'
+                ? 'bg-indigo-600 text-white font-bold border-indigo-500 shadow-sm'
+                : 'bg-slate-900 text-slate-400 hover:text-slate-200 border-slate-800'
+            }`}
+          >
+            <Users className="w-4 h-4 text-indigo-400" />
+            <span>مدیریت کاربران و دسترسی‌ها</span>
+          </button>
+        )}
       </div>
 
       {/* Tab 1: Review Queue (فایل‌های ارسال شده توسط ربات تلگرام) */}
@@ -4908,6 +4927,13 @@ CMD ["python", "telegram_scraper.py"]`}
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Tab: User Management (Admin Only) */}
+      {activeAdminTab === 'users' && currentUser && (
+        <div className="max-w-6xl mx-auto">
+          <UserManager currentUser={currentUser} />
         </div>
       )}
 

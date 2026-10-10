@@ -7,6 +7,7 @@ import fs from 'fs';
 import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import cookieParser from 'cookie-parser';
 import {
   S3Client,
   PutObjectCommand,
@@ -22,10 +23,16 @@ import {
   publishTrackToTelegramChannel,
 } from './server/telegram.js';
 import { youtubeMonitor } from './server/youtubeMonitor.js';
+import { authService } from './server/services/authService.js';
+import publicRoutes from './server/routes/public.js';
+import adminRoutes from './server/routes/admin.js';
 
 const execFileAsync = promisify(execFile);
 
 dotenv.config();
+
+// ایجاد ادمین اولیه در صورت نیاز (Bootstrap Admin)
+authService.initBootstrapAdmin();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,6 +41,11 @@ const app = express();
 const port = 3000;
 
 app.use(express.json());
+app.use(cookieParser());
+
+// مسیرهای استاندارد تفکیک‌شده معماری جدید
+app.use('/api/public', publicRoutes);
+app.use('/api/admin', adminRoutes);
 
 // In-memory buffer for uploaded files (up to 100MB)
 const storage = multer.memoryStorage();
@@ -1335,7 +1347,20 @@ app.post('/api/extract-url', async (req, res) => {
 // 1. Get entire database state
 app.get('/api/db/all', (req, res) => {
   try {
-    res.json({ success: true, data: localDb.getAll() });
+    const raw = localDb.getAll();
+    const safeData = {
+      ...raw,
+      botConfig: raw.botConfig
+        ? {
+            ...raw.botConfig,
+            token: raw.botConfig.token
+              ? `${raw.botConfig.token.slice(0, 4)}••••••••${raw.botConfig.token.slice(-4)}`
+              : '',
+            hasToken: Boolean(raw.botConfig.token),
+          }
+        : undefined,
+    };
+    res.json({ success: true, data: safeData });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -1511,12 +1536,32 @@ app.delete('/api/categories/:id', (req, res) => {
 
 // 6. Telegram Bot Config & Actions
 app.get('/api/bot/config', (req, res) => {
-  res.json({ success: true, config: localDb.getBotConfig() });
+  const config = localDb.getBotConfig();
+  const maskedConfig = {
+    ...config,
+    token: config.token
+      ? `${config.token.slice(0, 4)}••••••••${config.token.slice(-4)}`
+      : '',
+    hasToken: Boolean(config.token),
+  };
+  res.json({ success: true, config: maskedConfig });
 });
 
 app.post('/api/bot/config', (req, res) => {
-  const updated = localDb.updateBotConfig(req.body);
-  res.json({ success: true, config: updated });
+  const payload = { ...req.body };
+  // Never overwrite an existing token with masked dots
+  if (payload.token && payload.token.includes('••')) {
+    delete payload.token;
+  }
+  const updated = localDb.updateBotConfig(payload);
+  const safeUpdated = {
+    ...updated,
+    token: updated.token
+      ? `${updated.token.slice(0, 4)}••••••••${updated.token.slice(-4)}`
+      : '',
+    hasToken: Boolean(updated.token),
+  };
+  res.json({ success: true, config: safeUpdated });
 });
 
 app.post('/api/bot/test', async (req, res) => {
@@ -1587,8 +1632,10 @@ app.get('/api/db/export', (req, res) => {
 });
 
 app.post('/api/db/reset', (req, res) => {
-  const fresh = localDb.resetToDefault();
-  res.json({ success: true, message: 'دیتابیس به مقادیر پیش‌فرض اولیه بازگردانده شد.', data: fresh });
+  return res.status(403).json({
+    success: false,
+    error: 'مسیر بازنشانی دیتابیس به دلایل امنیتی تا پیاده‌سازی کامل سیستم احراز هویت غیرفعال است.',
+  });
 });
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static('dist'));

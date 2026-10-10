@@ -375,4 +375,54 @@ export const api = {
     const data = await res.json();
     return data;
   },
+
+  // 10. Auth & Users API (Phase 2)
+  async login(username: string, password: string): Promise<any> {
+    const res = await fetch('/api/admin/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || 'ورود ناموفق بود');
+    return data;
+  },
+
+  async logout(): Promise<void> {
+    await fetch('/api/admin/auth/logout', { method: 'POST' });
+  },
+
+  async getMe(): Promise<any> {
+    try {
+      const res = await fetch('/api/admin/auth/me');
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data.success ? data.user : null;
+    } catch (_) {
+      return null;
+    }
+  },
+
+  async getUsers(): Promise<any[]> {
+    const res = await fetch('/api/admin/users');
+    const data = await res.json();
+    return data.users || [];
+  },
+
+  async createUser(user: { username: string; password: string; role: string; telegram_id?: string }): Promise<any> {
+    const res = await fetch('/api/admin/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(user),
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || 'خطا در ساخت کاربر');
+    return data.user;
+  },
+
+  async deleteUser(userId: string): Promise<void> {
+    const res = await fetch(`/api/admin/users/${userId}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || 'خطا در حذف کاربر');
+  },
 };

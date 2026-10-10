@@ -5,6 +5,14 @@ export interface LyricLine {
   textPersian: string;
 }
 
+export interface AuthUser {
+  id: string;
+  username: string;
+  role: 'admin' | 'reviewer';
+  telegram_id?: string | null;
+  created_at?: string;
+}
+
 export type TrackStatus = 'approved' | 'pending' | 'rejected';
 export type TrackSourceType = 'youtube' | 'telegram' | 'web_url' | 'manual_upload';
 

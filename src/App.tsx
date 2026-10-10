@@ -11,6 +11,7 @@ import { AdminDashboard } from './components/admin/AdminDashboard';
 import { MiniPlayer } from './components/player/MiniPlayer';
 import { FullPlayerModal } from './components/player/FullPlayerModal';
 import { CarModeModal } from './components/player/CarModeModal';
+import { LoginModal } from './components/admin/LoginModal';
 import {
   INITIAL_TRACKS,
   INITIAL_PENDING_QUEUE,
@@ -32,6 +33,7 @@ import {
   SupabaseConfig,
   ScraperLog,
   BotConfig,
+  AuthUser,
 } from './types';
 import { api } from './services/api';
 
@@ -50,6 +52,9 @@ const DEFAULT_BOT_CONFIG: BotConfig = {
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<'player' | 'admin'>('player');
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+
   const [tracks, setTracks] = useState<Track[]>(INITIAL_TRACKS);
   const [pendingQueue, setPendingQueue] = useState<Track[]>(INITIAL_PENDING_QUEUE);
   const [reciterList, setReciterList] = useState<Reciter[]>(INITIAL_RECITERS);
@@ -62,7 +67,16 @@ export default function App() {
   const [botConfig, setBotConfig] = useState<BotConfig>(DEFAULT_BOT_CONFIG);
   const [isDbLoaded, setIsDbLoaded] = useState(false);
 
-  // Sync with persistent local database on mount
+  // بررسی احراز هویت اولیه کاربر هنگام بارگذاری برنامه
+  useEffect(() => {
+    api.getMe().then((user) => {
+      if (user) {
+        setCurrentUser(user);
+      }
+    });
+  }, []);
+
+  // همگام‌سازی با پایگاه داده برخط
   const refreshFromDb = useCallback(async () => {
     try {
       const db = await api.getFullDatabase();
@@ -87,19 +101,38 @@ export default function App() {
     refreshFromDb();
   }, [refreshFromDb]);
 
+  const handleTabChange = (tab: 'player' | 'admin') => {
+    if (tab === 'admin' && !currentUser) {
+      setIsLoginModalOpen(true);
+      return;
+    }
+    setCurrentTab(tab);
+  };
+
+  const handleLogout = async () => {
+    try {
+      await api.logout();
+    } catch (_) {}
+    setCurrentUser(null);
+    setCurrentTab('player');
+  };
+
   return (
     <PlayerProvider>
       <div className="min-h-screen bg-[#0b0f19] text-slate-100 flex flex-col font-sans selection:bg-emerald-500/30 selection:text-emerald-200">
-        {/* Top Navigation */}
+        {/* نوار ناوبری بالا با وضعیت ورود کاربر */}
         <Header
           currentTab={currentTab}
-          setCurrentTab={setCurrentTab}
+          setCurrentTab={handleTabChange}
           pendingCount={pendingQueue.length}
+          currentUser={currentUser}
+          onOpenLogin={() => setIsLoginModalOpen(true)}
+          onLogout={handleLogout}
         />
 
-        {/* Main Workspace Viewport */}
+        {/* محتوای اصلی بر اساس تب انتخاب شده */}
         <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 pt-6">
-          {currentTab === 'player' ? (
+          {currentTab === 'player' || !currentUser ? (
             <UserView
               tracks={tracks}
               categories={categoryList}
@@ -107,6 +140,7 @@ export default function App() {
             />
           ) : (
             <AdminDashboard
+              currentUser={currentUser}
               tracks={tracks}
               setTracks={setTracks}
               pendingQueue={pendingQueue}
@@ -130,14 +164,24 @@ export default function App() {
           )}
         </main>
 
-        {/* Persistent Bottom Floating Audio Dock */}
+        {/* پلیر شناور پایین صفحه */}
         <MiniPlayer />
 
-        {/* Full-Screen Synced Prayer Player & Visualizer Modal */}
+        {/* مدال تمام‌صفحه پلیر و فرازهای دعا */}
         <FullPlayerModal />
 
-        {/* Giant Tactile Car Mode Modal for Safe Driving */}
+        {/* مدال حالت رانندگی (Car Mode) */}
         <CarModeModal />
+
+        {/* دیالوگ ورود مدیران و بررسی‌کنندگان */}
+        <LoginModal
+          isOpen={isLoginModalOpen}
+          onClose={() => setIsLoginModalOpen(false)}
+          onLoginSuccess={(user) => {
+            setCurrentUser(user);
+            setCurrentTab('admin');
+          }}
+        />
       </div>
     </PlayerProvider>
   );

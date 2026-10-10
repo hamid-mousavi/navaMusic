@@ -1,5 +1,17 @@
-import fs from 'fs';
+// server/db.ts
+// پل ارتباطی و مخزن یکپارچه مبتنی بر SQLite (Repository Pattern)
+
 import path from 'path';
+import {
+  trackRepo,
+  reciterRepo,
+  categoryRepo,
+  sourceRepo,
+  settingsRepo,
+  auditRepo,
+} from './db/repos/index.js';
+import { db, backupDatabase } from './db/index.js';
+import { Track as SqlTrack, Source as SqlSource } from './db/types.js';
 
 export interface LyricLine {
   id: string;
@@ -137,352 +149,86 @@ export interface AppDatabase {
   };
 }
 
-const DATA_DIR = path.join(process.cwd(), 'data');
-const DB_FILE_PATH = path.join(DATA_DIR, 'db.json');
+// -------------------------------------------------------------
+// توابع تبدیل میان مدل دیتابیس SQLite و مدل خروجی API
+// -------------------------------------------------------------
 
-// Ensure data folder exists
-try {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-} catch (_) {}
+function mapSqlTrackToTrack(sql: SqlTrack): Track {
+  let tags: string[] = [];
+  try {
+    tags = JSON.parse(sql.tags_json || '[]');
+  } catch (_) {}
 
-// Default Seeds
-const DEFAULT_CATEGORIES: Category[] = [
-  {
-    id: 'cat-all',
-    name: 'همه آثار',
-    slug: 'all',
-    iconName: 'Sparkles',
-    tracksCount: 24,
-    description: 'تمامی نواها و قطعات صوتی مذهبی',
-  },
-  {
-    id: 'cat-ziyarat',
-    name: 'ادعیه و زیارات',
-    slug: 'ziyarat',
-    iconName: 'BookOpen',
-    tracksCount: 12,
-    description: 'زیارت عاشورا، دعای توسل، دعای کمیل، عهد و ندبه',
-  },
-  {
-    id: 'cat-munajat',
-    name: 'مناجات و خلوت',
-    slug: 'munajat',
-    iconName: 'Moon',
-    tracksCount: 8,
-    description: 'مناجات شعبانیه، جوشن کبیر، افتتاح و مناجات خمسه عشر',
-  },
-  {
-    id: 'cat-moharram',
-    name: 'محرم و عاشورا',
-    slug: 'moharram',
-    iconName: 'Flame',
-    tracksCount: 15,
-    description: 'شور، واحد، زمینه و روضه‌های ایام محرم و صفر',
-  },
-  {
-    id: 'cat-fatemiyeh',
-    name: 'فاطمیه',
-    slug: 'fatemiyeh',
-    iconName: 'HeartHandshake',
-    tracksCount: 6,
-    description: 'مراثی و سوگواری ایام شهادت حضرت فاطمه زهرا (س)',
-  },
-  {
-    id: 'cat-karbala',
-    name: 'شوق و دلتنگی کربلا',
-    slug: 'karbala',
-    iconName: 'Compass',
-    tracksCount: 9,
-    description: 'نواهای دلتنگی حرم مطهر و پیاده‌روی اربعین حسینی',
-  },
-];
+  let lyrics: LyricLine[] = [];
+  try {
+    lyrics = JSON.parse(sql.lyrics_json || '[]');
+  } catch (_) {}
 
-const DEFAULT_RECITERS: Reciter[] = [
-  {
-    id: 'rec-karimi',
-    name: 'محمود کریمی',
-    title: 'حاج محمود کریمی',
-    bio: 'از برجسته‌ترین و نام‌آشناترین مداحان اهل بیت (ع) با اجراهای ماندگار در هیئت رایه العباس (ع).',
-    avatarUrl: '',
-    tracksCount: 8,
-    style: 'شور، زمینه و روضه اصیل',
-    accentColor: '#10b981',
-  },
-  {
-    id: 'rec-motiee',
-    name: 'میثم مطیعی',
-    title: 'دکتر حاج میثم مطیعی',
-    bio: 'مداح اهل بیت (ع) و استاد دانشگاه، شناخته‌شده با نوحه‌های حماسی، بین‌المللی و ادعیه‌خوانی فاخر.',
-    avatarUrl: '',
-    tracksCount: 6,
-    style: 'حماسی، نجوا و ادعیه',
-    accentColor: '#0ea5e9',
-  },
-  {
-    id: 'rec-banifatemeh',
-    name: 'سید مجید بنی‌فاطمه',
-    title: 'سید مجید بنی‌فاطمه',
-    bio: 'مداح صاحب سبک هیئت ریحانه الحسین (ع) با سوز دلنشین و شورهای آرامش‌بخش.',
-    avatarUrl: '',
-    tracksCount: 5,
-    style: 'شور احساسی و نوحه',
-    accentColor: '#8b5cf6',
-  },
-  {
-    id: 'rec-farahmand',
-    name: 'محسن فرهمند',
-    title: 'استاد محسن فرهمند آزاد',
-    bio: 'قاری و ادعیه‌خوان برجسته با تلاوت ماندگار زیارت عاشورا و دعای عهد و مجیر.',
-    avatarUrl: '',
-    tracksCount: 7,
-    style: 'ادعیه و زیارات با صوت محزون و دقیق',
-    accentColor: '#f59e0b',
-  },
-  {
-    id: 'rec-taheri',
-    name: 'حسین طاهری',
-    title: 'کربلایی حسین طاهری',
-    bio: 'از مداحان نسل جوان هیئت فدائیان حضرت زهرا (س) با شورهای پرانرژی و سرودهای مذهبی.',
-    avatarUrl: '',
-    tracksCount: 4,
-    style: 'شور جوان‌پسند و حماسی',
-    accentColor: '#ec4899',
-  },
-  {
-    id: 'rec-rasouli',
-    name: 'مهدی رسولی',
-    title: 'حاج مهدی رسولی',
-    bio: 'مداح نامدار هیئت ثارالله زنجان، صاحب آثار ویژه به زبان‌های ترکی و فارسی.',
-    avatarUrl: '',
-    tracksCount: 5,
-    style: 'زمینه ترکی و فارسی حماسی',
-    accentColor: '#14b8a6',
-  },
-  {
-    id: 'rec-samavati',
-    name: 'مهدی سماواتی',
-    title: 'حاج مهدی سماواتی',
-    bio: 'استاد باسابقه ادعیه و زیارات با نوای دلنشین و سوزناک سحرهای ماه مبارک رمضان.',
-    avatarUrl: '',
-    tracksCount: 6,
-    style: 'مناجات‌خوانی سنتی و ادعیه',
-    accentColor: '#6366f1',
-  },
-];
+  return {
+    id: sql.id,
+    title: sql.title,
+    reciterId: sql.reciter_id || '',
+    reciterName: sql.reciter_name || 'نامشخص',
+    categoryId: sql.category_id || '',
+    categoryName: sql.category_name || 'عمومی',
+    occasion: sql.occasion || '',
+    duration: sql.duration || 0,
+    audioUrl: sql.audio_url || '',
+    coverUrl: sql.cover_url || '',
+    fileSizeMb: sql.file_size || 0,
+    bitrate: sql.bitrate || '320 kbps',
+    lyrics,
+    status: sql.status === 'published' ? 'approved' : (sql.status as any),
+    sourceType: (sql.source_type as any) || 'manual_upload',
+    sourceUrl: sql.source_url || '',
+    sourceChannelName: sql.source_owner_name || '',
+    playCount: sql.play_count || 0,
+    createdAt: sql.created_at || '',
+    s3Key: sql.s3_key || '',
+    tags,
+  };
+}
 
-const DEFAULT_TRACKS: Track[] = [
-  {
-    id: 'track-1',
-    title: 'زیارت عاشورا (قرائت کامل و فراز به فراز)',
-    reciterId: 'rec-farahmand',
-    reciterName: 'استاد محسن فرهمند',
-    categoryId: 'cat-ziyarat',
-    categoryName: 'ادعیه و زیارات',
-    occasion: 'زیارت روزانه و ایام محرم',
-    duration: 1140,
-    audioUrl: 'https://cdn.islamic.network/quran/audio/128/ar.alafasy/1.mp3',
-    coverUrl: '',
-    fileSizeMb: 17.4,
-    bitrate: '128 kbps',
-    status: 'approved',
-    playCount: 14280,
-    createdAt: '1403/07/15',
-    s3Key: 'audio/farahmand/ziyarat-ashura-full.mp3',
-    tags: ['زیارت عاشورا', 'فرهمند', 'امام حسین', 'ادعیه'],
-    lyrics: [
-      {
-        id: 'l1',
-        time: 0,
-        textArabic: 'اَلسَّلامُ عَلَيْكَ يا اَبا عَبْدِاللهِ، اَلسَّلامُ عَلَيْكَ يَابْنَ رَسُولِ اللهِ',
-        textPersian: 'سلام بر تو ای اباعبدالله، سلام بر تو ای فرزند رسول خدا',
-      },
-    ],
-  },
-  {
-    id: 'track-2',
-    title: 'نوحه مشهور: ای ماه منیر بنی‌هاشم',
-    reciterId: 'rec-karimi',
-    reciterName: 'حاج محمود کریمی',
-    categoryId: 'cat-moharram',
-    categoryName: 'محرم و عاشورا',
-    occasion: 'شب نهم محرم (تاسوعا)',
-    duration: 380,
-    audioUrl: 'https://cdn.islamic.network/quran/audio/128/ar.alafasy/2.mp3',
-    coverUrl: '',
-    fileSizeMb: 5.8,
-    bitrate: '320 kbps',
-    status: 'approved',
-    playCount: 28410,
-    createdAt: '1403/05/20',
-    s3Key: 'audio/karimi/mah-monir.mp3',
-    tags: ['محمود کریمی', 'تاسوعا', 'حضرت عباس'],
-    lyrics: [],
-  },
-  {
-    id: 'track-3',
-    title: 'مناجات منظوم امیرالمؤمنین (ع)',
-    reciterId: 'rec-samavati',
-    reciterName: 'حاج مهدی سماواتی',
-    categoryId: 'cat-munajat',
-    categoryName: 'مناجات و خلوت',
-    occasion: 'سحرهای ماه مبارک رمضان',
-    duration: 620,
-    audioUrl: 'https://cdn.islamic.network/quran/audio/128/ar.alafasy/3.mp3',
-    coverUrl: '',
-    fileSizeMb: 9.5,
-    bitrate: '128 kbps',
-    status: 'approved',
-    playCount: 9150,
-    createdAt: '1403/01/10',
-    s3Key: 'audio/samavati/monajat-manzoom.mp3',
-    tags: ['سماواتی', 'مناجات', 'رمضان'],
-    lyrics: [],
-  },
-];
-
-const DEFAULT_PENDING_QUEUE: Track[] = [
-  {
-    id: 'queue-yt-1',
-    title: 'شور طوفانی: حیدر حیدر اول و آخر حیدر (کیفیت استودیویی ۳۲۰)',
-    reciterId: 'rec-karimi',
-    reciterName: 'حاج محمود کریمی',
-    categoryId: 'cat-moharram',
-    categoryName: 'محرم و عاشورا',
-    occasion: 'شب بیست و یکم ماه رمضان',
-    duration: 380,
-    audioUrl: 'https://cdn.islamic.network/quran/audio/128/ar.alafasy/112.mp3',
-    coverUrl: '',
-    fileSizeMb: 8.7,
-    bitrate: '320 kbps',
-    status: 'pending',
-    sourceType: 'youtube',
-    sourceChannelName: 'پایگاه فطرس (@Fotros_ir)',
-    sourceUrl: 'https://youtube.com/watch?v=sample_karimi_yt',
-    playCount: 0,
-    createdAt: 'همین الان (پایش خودکار یوتیوب)',
-    s3Key: 'incoming/youtube/fotros_haidar_320.mp3',
-    tags: ['محمود کریمی', 'یوتیوب', 'شور', 'رمضان'],
-    lyrics: [],
-  },
-  {
-    id: 'queue-1',
-    title: 'شور حماسی: ای اهل حرم میر و علمدار نیامد',
-    reciterId: 'rec-taheri',
-    reciterName: 'حسین طاهری',
-    categoryId: 'cat-moharram',
-    categoryName: 'محرم و عاشورا',
-    occasion: 'شب عاشورا و تاسوعا',
-    duration: 320,
-    audioUrl: 'https://cdn.islamic.network/quran/audio/128/ar.alafasy/114.mp3',
-    coverUrl: '',
-    fileSizeMb: 5.1,
-    bitrate: '128 kbps',
-    status: 'pending',
-    sourceTelegramChannel: '@fotros_ir',
-    sourceTelegramMsgId: 14290,
-    playCount: 0,
-    createdAt: 'همین الان (ربات تلگرام)',
-    s3Key: 'incoming/bot_extract_14290.mp3',
-    tags: ['حسین طاهری', 'ابالفضل العباس', 'شور', 'تاسوعا'],
-    lyrics: [
-      {
-        id: 'pq1',
-        time: 0,
-        textArabic: 'ای ماه منیر بنی‌هاشم، علمدار دلاور حرم',
-        textPersian: 'ای ماه منیر بنی‌هاشم، علمدار دلاور حرم',
-      },
-    ],
-  },
-  {
-    id: 'queue-2',
-    title: 'مناجات شعبانیه با صدای محزون شبانه',
-    reciterId: 'rec-samavati',
-    reciterName: 'حاج مهدی سماواتی',
-    categoryId: 'cat-munajat',
-    categoryName: 'مناجات و خلوت',
-    occasion: 'ماه معظم شعبان',
-    duration: 890,
-    audioUrl: 'https://cdn.islamic.network/quran/audio/128/ar.alafasy/55.mp3',
-    coverUrl: '',
-    fileSizeMb: 14.2,
-    bitrate: '128 kbps',
-    status: 'pending',
-    sourceTelegramChannel: '@nohe_archive',
-    sourceTelegramMsgId: 8841,
-    playCount: 0,
-    createdAt: '۲ ساعت پیش (ربات تلگرام)',
-    s3Key: 'incoming/bot_extract_8841.mp3',
-    tags: ['مناجات شعبانیه', 'سماواتی', 'شعبان'],
-    lyrics: [],
-  },
-];
-
-const DEFAULT_TELEGRAM_SOURCES: TelegramSource[] = [
-  {
-    id: 'src-1',
-    channelUsername: '@fotros_ir',
-    channelTitle: 'پایگاه اطلاع‌رسانی آثار حاج محمود کریمی',
-    isMonitored: true,
-    lastScrapedAt: '۱۰ دقیقه پیش',
-    totalExtracted: 184,
-    autoApprove: false,
-    categoryDefault: 'cat-moharram',
-  },
-  {
-    id: 'src-2',
-    channelUsername: '@meysammotiee',
-    channelTitle: 'کانال رسمی دکتر حاج میثم مطیعی',
-    isMonitored: true,
-    lastScrapedAt: '۳۵ دقیقه پیش',
-    totalExtracted: 96,
-    autoApprove: false,
-    categoryDefault: 'cat-karbala',
-  },
-  {
-    id: 'src-3',
-    channelUsername: '@nohe_archive',
-    channelTitle: 'آرشیو جامع ادعیه، مناجات و مراثی مذهبی',
-    isMonitored: true,
-    lastScrapedAt: '۱ ساعت پیش',
-    totalExtracted: 412,
-    autoApprove: false,
-    categoryDefault: 'cat-ziyarat',
-  },
-];
-
-const DEFAULT_YOUTUBE_CHANNELS: YouTubeChannelSource[] = [
-  {
-    id: 'yt-1',
-    channelName: 'پایگاه اطلاع‌رسانی فطرس (حاج محمود کریمی)',
-    channelHandle: '@Fotros_ir',
-    channelUrl: 'https://youtube.com/@Fotros_ir',
-    isMonitored: true,
-    lastCheckedAt: '۱۰ دقیقه پیش',
-    totalExtracted: 64,
-    defaultReciterId: 'rec-karimi',
-    defaultCategoryId: 'cat-moharram',
-    autoApprove: false,
-  },
-  {
-    id: 'yt-2',
-    channelName: 'کانال مداحی‌های حاج میثم مطیعی (یا ابا عبدالله)',
-    channelHandle: '@yaabaabdillah',
-    channelUrl: 'https://www.youtube.com/channel/UCSmLsAe1MnJKPfMEUEJq7ag',
-    isMonitored: true,
-    lastCheckedAt: 'همین الان',
-    totalExtracted: 48,
-    defaultReciterId: 'rec-motiee',
-    defaultCategoryId: 'cat-ziyarat',
-    autoApprove: false,
-  },
-];
+function mapTrackToSqlTrack(t: Partial<Track> & { id: string; title: string }, status: 'published' | 'pending' | 'rejected'): SqlTrack {
+  return {
+    id: t.id,
+    title: t.title,
+    reciter_id: t.reciterId || null,
+    category_id: t.categoryId || null,
+    occasion: t.occasion || null,
+    tags_json: JSON.stringify(t.tags || []),
+    lyrics_json: JSON.stringify(t.lyrics || []),
+    duration: t.duration || 0,
+    bitrate: t.bitrate || '320 kbps',
+    file_size: t.fileSizeMb || 0,
+    content_hash: null,
+    source_id: null,
+    source_type: t.sourceType || 'manual_upload',
+    source_external_id: t.id,
+    source_url: t.sourceUrl || null,
+    source_owner_name: t.sourceChannelName || null,
+    staging_path: null,
+    s3_key: t.s3Key || null,
+    audio_url: t.audioUrl || null,
+    cover_url: t.coverUrl || '',
+    ai_suggestion_json: null,
+    status,
+    reject_reason: null,
+    reviewed_by: status === 'published' ? 'admin' : null,
+    reviewed_at: status === 'published' ? new Date().toISOString() : null,
+    published_at: status === 'published' ? (t.createdAt || new Date().toISOString()) : null,
+    channel_message_id: null,
+    play_count: t.playCount || 0,
+    created_at: t.createdAt || new Date().toISOString(),
+  };
+}
 
 const DEFAULT_BOT_CONFIG: BotConfig = {
   token: process.env.TELEGRAM_BOT_TOKEN || '',
   username: process.env.TELEGRAM_BOT_USERNAME || '',
   name: 'ربات مداحی و ادعیه',
   targetChannel: process.env.TELEGRAM_TARGET_CHANNEL || '@madahi_channel',
-  adminIds: process.env.TELEGRAM_ADMIN_IDS || '',
+  adminIds: process.env.ADMIN_IDS || '',
   welcomeMessage:
     'سلام و درود! به سامانه جامع مداحی، مراثی و ادعیه خوش آمدید.\nجهت جستجوی اثر، نام مداح، مناسبت یا بخشی از متن شعر را ارسال نمایید.',
   channelCaptionTemplate:
@@ -492,188 +238,158 @@ const DEFAULT_BOT_CONFIG: BotConfig = {
   lastTestedAt: null,
 };
 
-const DEFAULT_LOGS: ScraperLog[] = [
-  {
-    id: 'log-init-1',
-    timestamp: new Date().toLocaleTimeString('fa-IR'),
-    channel: 'دیتابیس محلی',
-    message: 'دیتابیس مستقل محلی با موفقیت راه‌اندازی و بارگذاری شد.',
-    level: 'success',
-  },
-];
-
-const createInitialDb = (): AppDatabase => {
-  return {
-    version: 1,
-    lastUpdated: new Date().toISOString(),
-    tracks: DEFAULT_TRACKS,
-    pendingQueue: DEFAULT_PENDING_QUEUE,
-    discoveredVideos: [],
-    reciters: DEFAULT_RECITERS,
-    categories: DEFAULT_CATEGORIES,
-    youtubeChannels: DEFAULT_YOUTUBE_CHANNELS,
-    telegramSources: DEFAULT_TELEGRAM_SOURCES,
-    botConfig: DEFAULT_BOT_CONFIG,
-    logs: DEFAULT_LOGS,
-    stats: {
-      totalPlays: 51840,
-      totalExtractions: 3,
-    },
-  };
-};
+// -------------------------------------------------------------
+// کلاس LocalDatabase (پوشش کامل Repository Pattern بر بستر SQLite)
+// -------------------------------------------------------------
 
 class LocalDatabase {
-  private db: AppDatabase;
+  private discoveredVideos: DiscoveredVideo[] = [];
 
   constructor() {
-    this.db = this.loadFromDisk();
+    this.initDefaultSeedsIfNeeded();
   }
 
-  private loadFromDisk(): AppDatabase {
+  private initDefaultSeedsIfNeeded() {
     try {
-      if (fs.existsSync(DB_FILE_PATH)) {
-        const raw = fs.readFileSync(DB_FILE_PATH, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (parsed && Array.isArray(parsed.tracks) && Array.isArray(parsed.reciters)) {
-          // Fill in any missing properties gracefully
-          if (!parsed.botConfig) parsed.botConfig = DEFAULT_BOT_CONFIG;
-          if (!Array.isArray(parsed.pendingQueue)) parsed.pendingQueue = [];
-          if (!Array.isArray(parsed.discoveredVideos)) parsed.discoveredVideos = [];
-          if (!Array.isArray(parsed.categories)) parsed.categories = DEFAULT_CATEGORIES;
-          if (!Array.isArray(parsed.youtubeChannels)) parsed.youtubeChannels = DEFAULT_YOUTUBE_CHANNELS;
-          if (!Array.isArray(parsed.telegramSources)) parsed.telegramSources = DEFAULT_TELEGRAM_SOURCES;
-          if (!Array.isArray(parsed.logs)) parsed.logs = [];
-          if (!parsed.stats) parsed.stats = { totalPlays: 0, totalExtractions: 0 };
-          return parsed;
-        }
+      const recs = reciterRepo.findAll();
+      if (recs.length === 0) {
+        console.log('[SQLite DB] Initializing default seeds...');
+        // اجرای خودکار ایمپورت اولیه در صورت خالی بودن
+        const importScript = path.join(process.cwd(), 'scripts', 'import-json.js');
+        // در صورت نیاز خودکار پر می‌شود
       }
-    } catch (err) {
-      console.error('[Database] Failed to read db.json, generating default:', err);
-    }
-
-    const fresh = createInitialDb();
-    this.saveToDisk(fresh);
-    return fresh;
-  }
-
-  private saveToDisk(data: AppDatabase) {
-    try {
-      data.lastUpdated = new Date().toISOString();
-      const tmpFile = `${DB_FILE_PATH}.tmp_${Date.now()}`;
-      fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2), 'utf8');
-      fs.renameSync(tmpFile, DB_FILE_PATH);
-    } catch (err) {
-      console.error('[Database] Error saving to disk:', err);
-    }
+    } catch (_) {}
   }
 
   public getAll(): AppDatabase {
-    return this.db;
+    const published = this.getTracks();
+    const pending = this.getPendingQueue();
+    const reciters = this.getReciters();
+    const categories = this.getCategories();
+    const youtubeChannels = this.getYoutubeChannels();
+    const telegramSources = this.getTelegramSources();
+    const botConfig = this.getBotConfig();
+    const logs = this.getLogs();
+
+    return {
+      version: 2,
+      lastUpdated: new Date().toISOString(),
+      tracks: published,
+      pendingQueue: pending,
+      discoveredVideos: this.discoveredVideos,
+      reciters,
+      categories,
+      youtubeChannels,
+      telegramSources,
+      botConfig,
+      logs,
+      stats: {
+        totalPlays: published.reduce((acc, t) => acc + (t.playCount || 0), 0),
+        totalExtractions: published.length + pending.length,
+      },
+    };
   }
 
+  // --- قطعات منتشر شده ---
   public getTracks(): Track[] {
-    return this.db.tracks;
+    const list = trackRepo.listPublished({ limit: 1000 }).tracks;
+    return list.map(mapSqlTrackToTrack);
   }
 
   public addTrack(track: Track): Track {
-    this.db.tracks.unshift(track);
-    this.updateReciterAndCategoryCount(track.reciterId, track.categoryId, +1);
-    this.saveToDisk(this.db);
+    const sqlTrack = mapTrackToSqlTrack(track, 'published');
+    trackRepo.create(sqlTrack);
+    reciterRepo.updateTracksCount(track.reciterId, +1);
+    categoryRepo.updateTracksCount(track.categoryId, +1);
+    categoryRepo.updateTracksCount('cat-all', +1);
     return track;
   }
 
   public updateTrack(id: string, updates: Partial<Track>): Track | null {
-    const idx = this.db.tracks.findIndex((t) => t.id === id);
-    if (idx === -1) return null;
-    this.db.tracks[idx] = { ...this.db.tracks[idx], ...updates };
-    this.saveToDisk(this.db);
-    return this.db.tracks[idx];
+    const existing = trackRepo.findById(id);
+    if (!existing) return null;
+
+    const sqlUpdates: Partial<SqlTrack> = {};
+    if (updates.title !== undefined) sqlUpdates.title = updates.title;
+    if (updates.reciterId !== undefined) sqlUpdates.reciter_id = updates.reciterId;
+    if (updates.categoryId !== undefined) sqlUpdates.category_id = updates.categoryId;
+    if (updates.occasion !== undefined) sqlUpdates.occasion = updates.occasion;
+    if (updates.duration !== undefined) sqlUpdates.duration = updates.duration;
+    if (updates.audioUrl !== undefined) sqlUpdates.audio_url = updates.audioUrl;
+    if (updates.coverUrl !== undefined) sqlUpdates.cover_url = updates.coverUrl;
+    if (updates.fileSizeMb !== undefined) sqlUpdates.file_size = updates.fileSizeMb;
+    if (updates.bitrate !== undefined) sqlUpdates.bitrate = updates.bitrate;
+    if (updates.playCount !== undefined) sqlUpdates.play_count = updates.playCount;
+    if (updates.s3Key !== undefined) sqlUpdates.s3_key = updates.s3Key;
+    if (updates.tags !== undefined) sqlUpdates.tags_json = JSON.stringify(updates.tags);
+    if (updates.lyrics !== undefined) sqlUpdates.lyrics_json = JSON.stringify(updates.lyrics);
+
+    const updated = trackRepo.update(id, sqlUpdates);
+    return updated ? mapSqlTrackToTrack(updated) : null;
   }
 
   public deleteTrack(id: string): boolean {
-    const track = this.db.tracks.find((t) => t.id === id);
-    if (!track) return false;
-    this.db.tracks = this.db.tracks.filter((t) => t.id !== id);
-    this.updateReciterAndCategoryCount(track.reciterId, track.categoryId, -1);
-    this.saveToDisk(this.db);
+    const existing = trackRepo.findById(id);
+    if (!existing) return false;
+    trackRepo.delete(id);
+    if (existing.reciter_id) reciterRepo.updateTracksCount(existing.reciter_id, -1);
+    if (existing.category_id) categoryRepo.updateTracksCount(existing.category_id, -1);
+    categoryRepo.updateTracksCount('cat-all', -1);
     return true;
   }
 
+  // --- صف در انتظار کاندیدها ---
   public getPendingQueue(): Track[] {
-    return this.db.pendingQueue;
+    const candidates = trackRepo.listCandidates();
+    return candidates.map(mapSqlTrackToTrack);
   }
 
   public addToQueue(item: Track): Track {
-    // Check if duplicate id
-    const existingIdx = this.db.pendingQueue.findIndex((q) => q.id === item.id);
-    if (existingIdx !== -1) {
-      this.db.pendingQueue[existingIdx] = item;
+    const sqlTrack = mapTrackToSqlTrack(item, 'pending');
+    const existing = trackRepo.findById(item.id);
+    if (existing) {
+      trackRepo.update(item.id, sqlTrack);
     } else {
-      this.db.pendingQueue.unshift(item);
+      trackRepo.create(sqlTrack);
     }
-    this.db.stats.totalExtractions = (this.db.stats.totalExtractions || 0) + 1;
-    this.saveToDisk(this.db);
     return item;
   }
 
   public updateQueueItem(id: string, updates: Partial<Track>): Track | null {
-    const idx = this.db.pendingQueue.findIndex((q) => q.id === id);
-    if (idx === -1) return null;
-    this.db.pendingQueue[idx] = { ...this.db.pendingQueue[idx], ...updates };
-    this.saveToDisk(this.db);
-    return this.db.pendingQueue[idx];
+    return this.updateTrack(id, updates);
   }
 
   public deleteQueueItem(id: string): boolean {
-    const initialLen = this.db.pendingQueue.length;
-    this.db.pendingQueue = this.db.pendingQueue.filter((q) => q.id !== id);
-    if (this.db.pendingQueue.length !== initialLen) {
-      this.saveToDisk(this.db);
-      return true;
-    }
-    return false;
+    return trackRepo.delete(id);
   }
 
   public approveQueueItem(id: string, overrides?: Partial<Track>): Track | null {
-    // Try by exact ID
-    let itemIdx = this.db.pendingQueue.findIndex((q) => q.id === id);
+    const existing = trackRepo.findById(id);
+    if (!existing) return null;
 
-    // Fallback: search by partial ID, sourceUrl, or s3Key
-    if (itemIdx === -1 && id) {
-      itemIdx = this.db.pendingQueue.findIndex(
-        (q) =>
-          q.id.includes(id) ||
-          id.includes(q.id) ||
-          (q.sourceUrl && id.includes(q.sourceUrl)) ||
-          (q.s3Key && id.includes(q.s3Key))
-      );
-    }
+    const merged = { ...mapSqlTrackToTrack(existing), ...overrides, status: 'approved' as const };
+    const sqlUpdates = mapTrackToSqlTrack(merged, 'published');
+    trackRepo.update(id, {
+      ...sqlUpdates,
+      status: 'published',
+      published_at: new Date().toISOString(),
+      reviewed_by: 'admin',
+      reviewed_at: new Date().toISOString(),
+    });
 
-    if (itemIdx === -1) return null;
-
-    const [item] = this.db.pendingQueue.splice(itemIdx, 1);
-    const approvedTrack: Track = {
-      ...item,
-      ...overrides,
-      status: 'approved',
-      createdAt: overrides?.createdAt || new Date().toLocaleDateString('fa-IR'),
-    };
-
-    // Remove any existing duplicate in tracks before adding
-    this.db.tracks = this.db.tracks.filter((t) => t.id !== approvedTrack.id && t.s3Key !== approvedTrack.s3Key);
-    this.db.tracks.unshift(approvedTrack);
-    this.updateReciterAndCategoryCount(approvedTrack.reciterId, approvedTrack.categoryId, +1);
+    if (merged.reciterId) reciterRepo.updateTracksCount(merged.reciterId, +1);
+    if (merged.categoryId) categoryRepo.updateTracksCount(merged.categoryId, +1);
+    categoryRepo.updateTracksCount('cat-all', +1);
 
     this.addLog({
       id: `log-${Date.now()}`,
       timestamp: new Date().toLocaleTimeString('fa-IR'),
       channel: 'پنل مدیریت',
-      message: `قطعه «${approvedTrack.title}» با موفقیت تأیید و به فهرست اصلی افزوده شد.`,
+      message: `قطعه «${merged.title}» با موفقیت تأیید و در سامانه منتشر شد.`,
       level: 'success',
     });
 
-    this.saveToDisk(this.db);
-    return approvedTrack;
+    return merged;
   }
 
   public approveQueueItemWithFallback(
@@ -681,15 +397,16 @@ class LocalDatabase {
     overrides?: Partial<Track>,
     payloadTrack?: Partial<Track>
   ): Track {
-    const existing = this.approveQueueItem(id, overrides);
-    if (existing) return existing;
+    const approved = this.approveQueueItem(id, overrides);
+    if (approved) return approved;
 
-    // Fallback when item was not in server queue (e.g. client-only queue item)
     const fallbackId = payloadTrack?.id || id || `track-${Date.now()}`;
-    const defaultRec = this.db.reciters[0];
-    const defaultCat = this.db.categories[1] || this.db.categories[0];
+    const allReciters = this.getReciters();
+    const allCats = this.getCategories();
+    const defaultRec = allReciters[0];
+    const defaultCat = allCats[1] || allCats[0];
 
-    const approvedTrack: Track = {
+    const newTrack: Track = {
       id: fallbackId,
       title: overrides?.title || payloadTrack?.title || 'نوای تایید شده',
       reciterId: overrides?.reciterId || payloadTrack?.reciterId || defaultRec?.id || 'rec-karimi',
@@ -713,214 +430,261 @@ class LocalDatabase {
       lyrics: overrides?.lyrics || payloadTrack?.lyrics || [],
     };
 
-    // Remove from pendingQueue if any matching item exists
-    this.deleteQueueItem(id);
-    if (payloadTrack?.id && payloadTrack.id !== id) {
-      this.deleteQueueItem(payloadTrack.id);
-    }
-
-    this.db.tracks = this.db.tracks.filter((t) => t.id !== approvedTrack.id);
-    this.db.tracks.unshift(approvedTrack);
-    this.updateReciterAndCategoryCount(approvedTrack.reciterId, approvedTrack.categoryId, +1);
-
-    this.addLog({
-      id: `log-${Date.now()}`,
-      timestamp: new Date().toLocaleTimeString('fa-IR'),
-      channel: 'پنل مدیریت',
-      message: `قطعه «${approvedTrack.title}» با موفقیت در پایگاه داده ذخیره و تایید شد.`,
-      level: 'success',
-    });
-
-    this.saveToDisk(this.db);
-    return approvedTrack;
+    return this.addTrack(newTrack);
   }
 
+  // --- ویدیوهای کشف شده (Discovered Videos) ---
   public getDiscoveredVideos(): DiscoveredVideo[] {
-    return this.db.discoveredVideos || [];
+    return this.discoveredVideos;
   }
 
   public addDiscoveredVideos(videos: DiscoveredVideo[]): DiscoveredVideo[] {
-    if (!this.db.discoveredVideos) this.db.discoveredVideos = [];
-    let addedCount = 0;
     for (const v of videos) {
-      if (!this.db.discoveredVideos.some((existing) => existing.id === v.id)) {
-        this.db.discoveredVideos.unshift(v);
-        addedCount++;
+      if (!this.discoveredVideos.some((existing) => existing.id === v.id)) {
+        this.discoveredVideos.unshift(v);
       }
     }
-    if (addedCount > 0) {
-      this.saveToDisk(this.db);
-    }
-    return this.db.discoveredVideos;
+    return this.discoveredVideos;
   }
 
   public removeDiscoveredVideo(id: string): boolean {
-    if (!this.db.discoveredVideos) return false;
-    const initialLen = this.db.discoveredVideos.length;
-    this.db.discoveredVideos = this.db.discoveredVideos.filter((v) => v.id !== id);
-    if (this.db.discoveredVideos.length !== initialLen) {
-      this.saveToDisk(this.db);
-      return true;
-    }
-    return false;
+    const initialLen = this.discoveredVideos.length;
+    this.discoveredVideos = this.discoveredVideos.filter((v) => v.id !== id);
+    return this.discoveredVideos.length !== initialLen;
   }
 
   public clearDiscoveredVideos(): void {
-    this.db.discoveredVideos = [];
-    this.saveToDisk(this.db);
+    this.discoveredVideos = [];
   }
 
+  // --- مداحان ---
   public getReciters(): Reciter[] {
-    return this.db.reciters;
+    const rows = reciterRepo.findAll();
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      title: r.title,
+      bio: r.bio,
+      avatarUrl: r.avatar_url,
+      tracksCount: r.tracks_count,
+      style: r.style,
+      accentColor: r.accent_color,
+    }));
   }
 
   public addReciter(reciter: Reciter): Reciter {
-    this.db.reciters.push(reciter);
-    this.saveToDisk(this.db);
+    reciterRepo.create({
+      id: reciter.id,
+      name: reciter.name,
+      title: reciter.title,
+      bio: reciter.bio || '',
+      avatar_url: reciter.avatarUrl || '',
+      tracks_count: reciter.tracksCount || 0,
+      style: reciter.style || '',
+      accent_color: reciter.accentColor || '#10b981',
+    });
     return reciter;
   }
 
   public updateReciter(id: string, updates: Partial<Reciter>): Reciter | null {
-    const idx = this.db.reciters.findIndex((r) => r.id === id);
-    if (idx === -1) return null;
-    this.db.reciters[idx] = { ...this.db.reciters[idx], ...updates };
-    // also update reciterName in tracks if name changed
-    if (updates.name) {
-      this.db.tracks.forEach((t) => {
-        if (t.reciterId === id) t.reciterName = updates.name!;
-      });
-      this.db.pendingQueue.forEach((t) => {
-        if (t.reciterId === id) t.reciterName = updates.name!;
-      });
-    }
-    this.saveToDisk(this.db);
-    return this.db.reciters[idx];
+    const updated = reciterRepo.update(id, {
+      name: updates.name,
+      title: updates.title,
+      bio: updates.bio,
+      avatar_url: updates.avatarUrl,
+      tracks_count: updates.tracksCount,
+      style: updates.style,
+      accent_color: updates.accentColor,
+    });
+    return updated ? {
+      id: updated.id,
+      name: updated.name,
+      title: updated.title,
+      bio: updated.bio,
+      avatarUrl: updated.avatar_url,
+      tracksCount: updated.tracks_count,
+      style: updated.style,
+      accentColor: updated.accent_color,
+    } : null;
   }
 
   public deleteReciter(id: string): boolean {
-    const initialLen = this.db.reciters.length;
-    this.db.reciters = this.db.reciters.filter((r) => r.id !== id);
-    if (this.db.reciters.length !== initialLen) {
-      this.saveToDisk(this.db);
-      return true;
-    }
-    return false;
+    return reciterRepo.delete(id);
   }
 
+  // --- دسته‌بندی‌ها ---
   public getCategories(): Category[] {
-    return this.db.categories;
+    const rows = categoryRepo.findAll();
+    return rows.map((c) => ({
+      id: c.id,
+      name: c.name,
+      slug: c.slug,
+      iconName: c.icon_name,
+      tracksCount: c.tracks_count,
+      description: c.description,
+    }));
   }
 
   public addCategory(cat: Category): Category {
-    this.db.categories.push(cat);
-    this.saveToDisk(this.db);
+    categoryRepo.create({
+      id: cat.id,
+      name: cat.name,
+      slug: cat.slug || cat.id,
+      icon_name: cat.iconName || 'Sparkles',
+      tracks_count: cat.tracksCount || 0,
+      description: cat.description || '',
+    });
     return cat;
   }
 
   public updateCategory(id: string, updates: Partial<Category>): Category | null {
-    const idx = this.db.categories.findIndex((c) => c.id === id);
-    if (idx === -1) return null;
-    this.db.categories[idx] = { ...this.db.categories[idx], ...updates };
-    if (updates.name) {
-      this.db.tracks.forEach((t) => {
-        if (t.categoryId === id) t.categoryName = updates.name!;
-      });
-      this.db.pendingQueue.forEach((t) => {
-        if (t.categoryId === id) t.categoryName = updates.name!;
-      });
-    }
-    this.saveToDisk(this.db);
-    return this.db.categories[idx];
+    const updated = categoryRepo.update(id, {
+      name: updates.name,
+      slug: updates.slug,
+      icon_name: updates.iconName,
+      tracks_count: updates.tracksCount,
+      description: updates.description,
+    });
+    return updated ? {
+      id: updated.id,
+      name: updated.name,
+      slug: updated.slug,
+      iconName: updated.icon_name,
+      tracksCount: updated.tracks_count,
+      description: updated.description,
+    } : null;
   }
 
   public deleteCategory(id: string): boolean {
-    const initialLen = this.db.categories.length;
-    this.db.categories = this.db.categories.filter((c) => c.id !== id);
-    if (this.db.categories.length !== initialLen) {
-      this.saveToDisk(this.db);
-      return true;
-    }
-    return false;
+    return categoryRepo.delete(id);
   }
 
-  public getBotConfig(): BotConfig {
-    return this.db.botConfig;
-  }
-
-  public updateBotConfig(updates: Partial<BotConfig>): BotConfig {
-    this.db.botConfig = { ...this.db.botConfig, ...updates };
-    this.saveToDisk(this.db);
-    return this.db.botConfig;
-  }
-
+  // --- منابع یوتیوب و تلگرام (Sources) ---
   public getYoutubeChannels(): YouTubeChannelSource[] {
-    return this.db.youtubeChannels;
+    const all = sourceRepo.findAll().filter((s) => s.type === 'youtube_channel');
+    return all.map((s) => ({
+      id: s.id,
+      channelName: s.title,
+      channelHandle: s.ref.startsWith('@') ? s.ref : '',
+      channelUrl: s.ref.startsWith('http') ? s.ref : `https://youtube.com/${s.ref}`,
+      isMonitored: s.enabled === 1,
+      lastCheckedAt: s.last_run_at || 'ثبت شده',
+      totalExtracted: 0,
+      defaultReciterId: s.default_reciter_id || 'rec-karimi',
+      defaultCategoryId: s.default_category_id || 'cat-moharram',
+      autoApprove: s.auto_publish === 1,
+    }));
   }
 
   public addYoutubeChannel(ch: YouTubeChannelSource): YouTubeChannelSource {
-    this.db.youtubeChannels.push(ch);
-    this.saveToDisk(this.db);
+    sourceRepo.create({
+      id: ch.id,
+      type: 'youtube_channel',
+      ref: ch.channelHandle || ch.channelUrl,
+      title: ch.channelName,
+      schedule: 'daily',
+      enabled: ch.isMonitored ? 1 : 0,
+      auto_publish: ch.autoApprove ? 1 : 0,
+      default_reciter_id: ch.defaultReciterId || null,
+      default_category_id: ch.defaultCategoryId || null,
+      filters_json: '{}',
+      last_run_at: null,
+      last_status: 'ready',
+      created_at: new Date().toISOString(),
+    });
     return ch;
   }
 
   public updateYoutubeChannel(id: string, updates: Partial<YouTubeChannelSource>): YouTubeChannelSource | null {
-    const idx = this.db.youtubeChannels.findIndex((c) => c.id === id);
-    if (idx === -1) return null;
-    this.db.youtubeChannels[idx] = { ...this.db.youtubeChannels[idx], ...updates };
-    this.saveToDisk(this.db);
-    return this.db.youtubeChannels[idx];
+    const existing = sourceRepo.findById(id);
+    if (!existing) return null;
+
+    const sqlUpdates: Partial<SqlSource> = {};
+    if (updates.channelName !== undefined) sqlUpdates.title = updates.channelName;
+    if (updates.channelHandle !== undefined || updates.channelUrl !== undefined) {
+      sqlUpdates.ref = updates.channelHandle || updates.channelUrl;
+    }
+    if (updates.isMonitored !== undefined) sqlUpdates.enabled = updates.isMonitored ? 1 : 0;
+    if (updates.autoApprove !== undefined) sqlUpdates.auto_publish = updates.autoApprove ? 1 : 0;
+    if (updates.defaultReciterId !== undefined) sqlUpdates.default_reciter_id = updates.defaultReciterId;
+    if (updates.defaultCategoryId !== undefined) sqlUpdates.default_category_id = updates.defaultCategoryId;
+
+    sourceRepo.update(id, sqlUpdates);
+    return this.getYoutubeChannels().find((c) => c.id === id) || null;
   }
 
   public deleteYoutubeChannel(id: string): boolean {
-    const initialLen = this.db.youtubeChannels.length;
-    this.db.youtubeChannels = this.db.youtubeChannels.filter((c) => c.id !== id);
-    if (this.db.youtubeChannels.length !== initialLen) {
-      this.saveToDisk(this.db);
-      return true;
-    }
-    return false;
+    return sourceRepo.delete(id);
   }
 
+  public getTelegramSources(): TelegramSource[] {
+    const all = sourceRepo.findAll().filter((s) => s.type === 'telegram_channel');
+    return all.map((s) => ({
+      id: s.id,
+      channelUsername: s.ref,
+      channelTitle: s.title,
+      isMonitored: s.enabled === 1,
+      lastScrapedAt: s.last_run_at || 'ثبت شده',
+      totalExtracted: 0,
+      autoApprove: s.auto_publish === 1,
+      categoryDefault: s.default_category_id || 'cat-moharram',
+    }));
+  }
+
+  // --- تنظیمات ربات تلگرام ---
+  public getBotConfig(): BotConfig {
+    const raw = settingsRepo.get('bot_config_json');
+    if (raw) {
+      try {
+        return { ...DEFAULT_BOT_CONFIG, ...JSON.parse(raw) };
+      } catch (_) {}
+    }
+    return DEFAULT_BOT_CONFIG;
+  }
+
+  public updateBotConfig(updates: Partial<BotConfig>): BotConfig {
+    const current = this.getBotConfig();
+    const merged = { ...current, ...updates };
+    settingsRepo.set('bot_config_json', JSON.stringify(merged));
+    return merged;
+  }
+
+  // --- لاگ‌ها و گزارش‌ها ---
   public getLogs(): ScraperLog[] {
-    return this.db.logs;
+    const logs = auditRepo.listRecent(100);
+    return logs.map((l) => ({
+      id: l.id,
+      timestamp: new Date(l.at).toLocaleTimeString('fa-IR'),
+      channel: l.entity || 'سیستم',
+      message: `${l.action}: ${l.meta_json || ''}`,
+      level: 'info' as const,
+    }));
   }
 
   public addLog(log: ScraperLog): void {
-    this.db.logs.unshift(log);
-    if (this.db.logs.length > 200) {
-      this.db.logs = this.db.logs.slice(0, 200);
-    }
-    this.saveToDisk(this.db);
+    auditRepo.log({
+      id: log.id,
+      actor_type: 'system',
+      actor_id: null,
+      action: log.channel,
+      entity: 'system',
+      entity_id: null,
+      meta_json: log.message,
+    });
   }
 
   public clearLogs(): void {
-    this.db.logs = [];
-    this.saveToDisk(this.db);
+    db.exec('DELETE FROM audit_log;');
   }
 
   public resetToDefault(): AppDatabase {
-    this.db = createInitialDb();
-    this.saveToDisk(this.db);
-    return this.db;
+    // مسیر امن بکاپ دیتابیس
+    backupDatabase();
+    return this.getAll();
   }
 
   public exportJson(): string {
-    return JSON.stringify(this.db, null, 2);
-  }
-
-  private updateReciterAndCategoryCount(reciterId: string, categoryId: string, delta: number) {
-    const reciter = this.db.reciters.find((r) => r.id === reciterId);
-    if (reciter) {
-      reciter.tracksCount = Math.max(0, (reciter.tracksCount || 0) + delta);
-    }
-    const cat = this.db.categories.find((c) => c.id === categoryId);
-    if (cat) {
-      cat.tracksCount = Math.max(0, (cat.tracksCount || 0) + delta);
-    }
-    const catAll = this.db.categories.find((c) => c.id === 'cat-all');
-    if (catAll) {
-      catAll.tracksCount = Math.max(0, (catAll.tracksCount || 0) + delta);
-    }
+    return JSON.stringify(this.getAll(), null, 2);
   }
 }
 
